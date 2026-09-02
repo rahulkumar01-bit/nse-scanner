@@ -1,0 +1,66 @@
+name: NSE Momentum Scanner
+
+on:
+  schedule:
+    # All times UTC. IST = UTC+5:30, so 09:15-15:30 IST = 03:45-10:00 UTC.
+    # Runs every 10 minutes during market hours (minutes ending in 5/45,
+    # offset to line up with the 09:15 IST open).
+    - cron: "45,55 3 * * 1-5"            # 09:15, 09:25 IST
+    - cron: "5,15,25,35,45,55 4-9 * * 1-5"  # 09:35 IST through 15:25 IST
+    - cron: "0 10 * * 1-5"               # 15:30 IST (market close)
+  workflow_dispatch: {}             # lets you trigger a manual test run from the Actions tab
+
+permissions:
+  contents: write   # needed to commit the updated dedupe-state file back to the repo
+
+concurrency:
+  group: nse-scanner
+  cancel-in-progress: false   # never kill a run that might be mid-scan; let it finish, skip overlap
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2#egg=neo_api_client"
+
+      - name: Run scan
+        env:
+          KOTAK_CONSUMER_KEY: ${{ secrets.KOTAK_CONSUMER_KEY }}
+          KOTAK_CONSUMER_SECRET: ${{ secrets.KOTAK_CONSUMER_SECRET }}
+          KOTAK_MOBILE_NUMBER: ${{ secrets.KOTAK_MOBILE_NUMBER }}
+          KOTAK_UCC: ${{ secrets.KOTAK_UCC }}
+          KOTAK_MPIN: ${{ secrets.KOTAK_MPIN }}
+          KOTAK_TOTP_SECRET: ${{ secrets.KOTAK_TOTP_SECRET }}
+          KOTAK_ENVIRONMENT: prod
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          ALERT_FROM_EMAIL: ${{ secrets.ALERT_FROM_EMAIL }}
+          ALERT_TO_EMAILS: ${{ secrets.ALERT_TO_EMAILS }}
+        run: python main.py --once
+
+      # Each run is a brand-new disposable VM, so the dedupe file
+      # (data/alert_state.json) has to be committed back to the repo,
+      # otherwise every run would re-alert on the same signal.
+      - name: Persist dedupe state
+        run: |
+          if [ -n "$(git status --porcelain data/alert_state.json 2>/dev/null)" ]; then
+            git config user.name "nse-scanner-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add data/alert_state.json
+            git commit -m "chore: update alert dedupe state [skip ci]"
+            git push
+          else
+            echo "No state change to commit"
+          fi
