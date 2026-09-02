@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nse-scanner</string>
+
+    <!-- caffeinate -i -s: prevents idle sleep (-i, works on battery or AC)
+         and system sleep (-s, while on AC power) for as long as this
+         process runs. It CANNOT override a closed lid with no external
+         display attached — that's a hardware-level sleep macOS enforces
+         regardless of any background process. See README for clamshell-mode
+         notes if you need lid-closed operation. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>-s</string>
+        <string>__PYTHON_BIN__</string>
+        <string>__PROJECT_DIR__/main.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+
+    <!-- Runs main.py's own continuous loop (it sleeps outside market hours
+         and scans every SCAN_INTERVAL_MINUTES during 09:15-15:30 IST). -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart automatically if it crashes or your Mac wakes from sleep
+         mid-run and the process died. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__PROJECT_DIR__/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_DIR__/logs/launchd.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+    </dict>
+</dict>
+</plist>
