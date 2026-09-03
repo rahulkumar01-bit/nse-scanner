@@ -18,55 +18,58 @@ def load_universe():
     return [s.strip().upper() for s in df["symbol"].tolist()]
 
 
-def build_token_map(kc, exchange_segment="nse_cm"):
+def build_token_map(kc, symbols, exchange_segment="nse_cm"):
     """
-    Downloads the scrip master and returns {symbol: instrument_token} for
-    the equity segment. F&O current-month futures tokens are resolved
-    separately in get_fno_token() since they roll over monthly.
+    Resolves each symbol to its instrument token via search_scrip() (which
+    is cached client-side per day by the SDK, so this doesn't hit the
+    network hard even for a large universe). Returns {symbol: instrument_token}.
     """
-    master = kc.scrip_master(exchange_segment=exchange_segment)
-    # The master comes back as a list of dicts (field names per Kotak's docs:
-    # pSymbol / pTrdSymbol / pSymbolName / lLotSize etc. — normalize defensively).
     token_map = {}
-    for row in master:
-        sym = (row.get("pTrdSymbol") or row.get("pSymbolName") or row.get("symbol") or "").upper()
-        # Kotak equity trading symbols often look like "RELIANCE-EQ"
-        sym = sym.replace("-EQ", "")
-        token = row.get("pSymbol") or row.get("instrument_token") or row.get("token")
-        if sym and token:
-            token_map[sym] = token
+    for symbol in symbols:
+        try:
+            results = kc.search_scrip(exchange_segment=exchange_segment, symbol=symbol)
+        except Exception:
+            log.exception("search_scrip failed for %s", symbol)
+            continue
+
+        for row in results or []:
+            trd_symbol = (row.get("pTrdSymbol") or "").upper()
+            sym_name = (row.get("pSymbolName") or "").upper()
+            group = (row.get("pGroup") or "").upper()
+            token = row.get("pSymbol")
+            # Prefer the plain equity listing (trading symbol "<SYM>-EQ" / group "EQ"),
+            # skipping variants like -BE/-BL/-BZ series.
+            if sym_name == symbol and token and (trd_symbol == f"{symbol}-EQ" or group == "EQ"):
+                token_map[symbol] = token
+                break
     return token_map
 
 
-def get_fno_token(kc, underlying_symbol, expiry="current_month"):
+def get_fno_token(kc, underlying_symbol):
     """
-    Resolves the current-month futures instrument token for an underlying.
-    Kotak's F&O master uses a similar shape to the equity one but with
-    pOptionType/pExpiryDate/pInstType fields — filter for FUTSTK/FUTIDX
-    with the nearest (unexpired) expiry.
+    Resolves the nearest-expiry futures instrument token for an underlying
+    via search_scrip(..., option_type="FUT"), picking the closest unexpired
+    contract from the results.
     """
-    master = kc.scrip_master(exchange_segment="nse_fo")
-    candidates = [
-        row for row in master
-        if (row.get("pSymbolName") or "").upper() == underlying_symbol
-        and (row.get("pInstType") or "").upper() in ("FUTSTK", "FUTIDX")
-    ]
-    if not candidates:
+    try:
+        results = kc.search_scrip(exchange_segment="nse_fo", symbol=underlying_symbol, option_type="FUT")
+    except Exception:
+        log.exception("search_scrip (FUT) failed for %s", underlying_symbol)
         return None
-    # pick nearest expiry that hasn't passed
-    def parse_expiry(row):
-        try:
-            return datetime.strptime(row.get("pExpiryDate", ""), "%d-%b-%Y")
-        except Exception:
-            return datetime.max
+    if not results:
+        return None
 
-    today = datetime.now()
-    future = [c for c in candidates if parse_expiry(c) >= today]
-    future.sort(key=parse_expiry)
+    def expiry_epoch(row):
+        try:
+            return float(row.get("lExpiryDate"))
+        except (TypeError, ValueError):
+            return float("inf")
+
+    now_epoch = datetime.now().timestamp()
+    future = [r for r in results if expiry_epoch(r) >= now_epoch]
+    future.sort(key=expiry_epoch)
     chosen = future[0] if future else None
-    if not chosen:
-        return None
-    return chosen.get("pSymbol") or chosen.get("token")
+    return chosen.get("pSymbol") if chosen else None
 
 
 def fetch_daily_history(kc, instrument_token, exchange_segment="nse_cm", lookback_days=90):
