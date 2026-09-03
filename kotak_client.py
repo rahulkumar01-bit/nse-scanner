@@ -22,6 +22,26 @@ class KotakClient:
     def __init__(self):
         self._client = None
 
+    @staticmethod
+    def _init_neo_api(NeoAPI):
+        """
+        Kotak's SDK has changed NeoAPI's constructor signature across
+        releases — some versions require consumer_secret, newer ones reject
+        it entirely. Try with it first (only if set), fall back without it.
+        """
+        base_kwargs = dict(
+            environment=config.KOTAK_ENVIRONMENT,
+            access_token=None,
+            neo_fin_key=None,
+            consumer_key=config.KOTAK_CONSUMER_KEY,
+        )
+        if config.KOTAK_CONSUMER_SECRET:
+            try:
+                return NeoAPI(consumer_secret=config.KOTAK_CONSUMER_SECRET, **base_kwargs)
+            except TypeError:
+                log.info("Installed neo_api_client rejects consumer_secret — retrying without it")
+        return NeoAPI(**base_kwargs)
+
     def login(self):
         """Authenticate via TOTP + MPIN. Raises on failure."""
         from neo_api_client import NeoAPI
@@ -30,14 +50,7 @@ class KotakClient:
                      "KOTAK_MPIN", "KOTAK_TOTP_SECRET"):
             if not getattr(config, attr):
                 raise RuntimeError(f"{attr} is not set — check your .env file")
-
-        client = NeoAPI(
-            environment=config.KOTAK_ENVIRONMENT,
-            access_token=None,
-            neo_fin_key=None,
-            consumer_key=config.KOTAK_CONSUMER_KEY,
-            consumer_secret=config.KOTAK_CONSUMER_SECRET,
-        )
+        client = self._init_neo_api(NeoAPI)
 
         totp_code = pyotp.TOTP(config.KOTAK_TOTP_SECRET).now()
 
