@@ -42,6 +42,27 @@ class KotakClient:
                 log.info("Installed neo_api_client rejects consumer_secret — retrying without it")
         return NeoAPI(**base_kwargs)
 
+    @staticmethod
+    def _call_totp_login(client, totp_code):
+        """
+        Kotak's own docs disagree with each other on this parameter's name —
+        some show mobilenumber, others mobile_number, depending on SDK
+        version/package. Try both rather than guess.
+        """
+        for kwarg_name in ("mobile_number", "mobilenumber"):
+            try:
+                return client.totp_login(
+                    ucc=config.KOTAK_UCC,
+                    totp=totp_code,
+                    **{kwarg_name: config.KOTAK_MOBILE_NUMBER},
+                )
+            except TypeError:
+                log.info("totp_login() rejected %s= — trying the other spelling", kwarg_name)
+        raise RuntimeError(
+            "totp_login() accepted neither mobile_number= nor mobilenumber= — "
+            "check your installed neo_api_client version's signature"
+        )
+
     def login(self):
         """Authenticate via TOTP + MPIN. Raises on failure."""
         from neo_api_client import NeoAPI
@@ -54,11 +75,7 @@ class KotakClient:
 
         totp_code = pyotp.TOTP(config.KOTAK_TOTP_SECRET).now()
 
-        client.totp_login(
-            mobilenumber=config.KOTAK_MOBILE_NUMBER,
-            ucc=config.KOTAK_UCC,
-            totp=totp_code,
-        )
+        self._call_totp_login(client, totp_code)
         client.totp_validate(mpin=config.KOTAK_MPIN)
 
         self._client = client
