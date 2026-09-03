@@ -104,7 +104,7 @@ def main():
 
     kc = KotakClient()
     kc.login()
-    token_map = data_fetcher.build_token_map(kc)
+    token_map = data_fetcher.build_token_map(kc, universe)
     log.info("Resolved %d/%d symbols to instrument tokens", len(token_map), len(universe))
 
     if args.once:
