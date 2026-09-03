@@ -29,9 +29,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install "git+https://github.com/Kotak-Neo/Kotak-neo-api-v2.git@v2.0.2#egg=neo_api_client"
+        run: pip install -r requirements.txt
 
       - name: Run scan
         env:
@@ -50,16 +48,16 @@ jobs:
           ALERT_TO_EMAILS: ${{ secrets.ALERT_TO_EMAILS }}
         run: python main.py --once
 
-      # Each run is a brand-new disposable VM, so the dedupe file
-      # (data/alert_state.json) has to be committed back to the repo,
-      # otherwise every run would re-alert on the same signal.
-      - name: Persist dedupe state
+      # Each run is a brand-new disposable VM, so both state files need to be
+      # committed back to the repo: the dedupe/OI file (data/alert_state.json)
+      # and the once-a-day Yahoo Finance baseline cache (data/yf_cache.json).
+      - name: Persist state
         run: |
-          if [ -n "$(git status --porcelain data/alert_state.json 2>/dev/null)" ]; then
+          if [ -n "$(git status --porcelain data/alert_state.json data/yf_cache.json 2>/dev/null)" ]; then
             git config user.name "nse-scanner-bot"
             git config user.email "actions@users.noreply.github.com"
-            git add data/alert_state.json
-            git commit -m "chore: update alert dedupe state [skip ci]"
+            git add data/alert_state.json data/yf_cache.json
+            git commit -m "chore: update scanner state [skip ci]"
             git push
           else
             echo "No state change to commit"
