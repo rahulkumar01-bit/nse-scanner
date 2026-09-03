@@ -24,11 +24,25 @@ import state_store
 from kotak_client import KotakClient
 
 os.makedirs(os.path.dirname(config.LOG_FILE), exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    handlers=[logging.FileHandler(config.LOG_FILE), logging.StreamHandler(sys.stdout)],
-)
+
+_IST = pytz.timezone(config.TIMEZONE)
+
+
+class ISTFormatter(logging.Formatter):
+    """Renders log timestamps in IST regardless of the host machine's
+    local timezone (GitHub Actions runners default to UTC)."""
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=_IST)
+        return dt.strftime(datefmt or "%Y-%m-%d %H:%M:%S IST")
+
+
+_formatter = ISTFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+_file_handler = logging.FileHandler(config.LOG_FILE)
+_file_handler.setFormatter(_formatter)
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.setFormatter(_formatter)
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler])
 log = logging.getLogger("nse_scanner.main")
 
 
