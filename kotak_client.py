@@ -120,6 +120,20 @@ class KotakClient:
         """Batch quote fetch for a list of {'instrument_token', 'exchange_segment'} dicts."""
         return self._client.quotes(instrument_tokens=instrument_tokens, quote_type="ltp")
 
-    def scrip_master(self, exchange_segment="nse_cm"):
-        """Downloads the instrument master (symbol -> token mapping)."""
-        return self._client.scrip_master(exchange_segment=exchange_segment)
+    def search_scrip(self, exchange_segment, symbol, expiry="", option_type="", strike_price="",
+                      ignore_50multiple=True):
+        """
+        Looks up a symbol directly against Kotak's scrip master (cached
+        client-side per day by the SDK). Returns a list of matching scrip
+        dicts — for equities that's usually one or two rows (EQ, plus BE/BL
+        variants); for exchange_segment="nse_fo" with option_type="FUT" it
+        returns all live futures expiries for that underlying.
+        """
+        return self._client.search_scrip(
+            exchange_segment=exchange_segment,
+            symbol=symbol,
+            expiry=expiry,
+            option_type=option_type,
+            strike_price=strike_price,
+            ignore_50multiple=ignore_50multiple,
+        )
