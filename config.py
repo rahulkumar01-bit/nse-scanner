@@ -12,7 +12,7 @@ load_dotenv()
 # Kotak Neo API credentials (from Invest > Trade API > API Dashboard)
 # ---------------------------------------------------------------------------
 KOTAK_CONSUMER_KEY = os.getenv("KOTAK_CONSUMER_KEY")
-KOTAK_CONSUMER_SECRET = os.getenv("KOTAK_CONSUMER_SECRET")
+KOTAK_CONSUMER_SECRET = os.getenv("KOTAK_CONSUMER_SECRET")  # optional — Kotak's newer SDK no longer requires this
 KOTAK_MOBILE_NUMBER = os.getenv("KOTAK_MOBILE_NUMBER")   # with country code, e.g. +9198xxxxxxx
 KOTAK_UCC = os.getenv("KOTAK_UCC")                        # Unique Client Code
 KOTAK_MPIN = os.getenv("KOTAK_MPIN")

@@ -116,9 +116,9 @@ class KotakClient:
         raise RuntimeError("SDK exposes neither get_historical_data nor historical_data — "
                             "check your installed neo_api_client version")
 
-    def quotes(self, instrument_tokens):
+    def quotes(self, instrument_tokens, quote_type="all"):
         """Batch quote fetch for a list of {'instrument_token', 'exchange_segment'} dicts."""
-        return self._client.quotes(instrument_tokens=instrument_tokens, quote_type="ltp")
+        return self._client.quotes(instrument_tokens=instrument_tokens, quote_type=quote_type)
 
     def search_scrip(self, exchange_segment, symbol, expiry="", option_type="", strike_price="",
                       ignore_50multiple=True):

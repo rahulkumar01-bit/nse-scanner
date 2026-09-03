@@ -56,16 +56,19 @@ def is_market_open(now=None):
     return open_t <= now.time() <= close_t
 
 
-def run_scan(kc, token_map, universe):
+def run_scan(kc, token_map, universe, yf_baseline):
     alerts = []
     for symbol in universe:
         try:
+            baseline = yf_baseline.get(symbol)
+            if not baseline:
+                continue  # no Yahoo Finance baseline available for this symbol — skip it
+
             if config.SCAN_EQUITIES:
                 token = token_map.get(symbol)
                 if token:
-                    df = data_fetcher.fetch_daily_history(kc, token)
-                    df = data_fetcher.compute_indicators(df)
-                    result = screener.evaluate(symbol, df, instrument="EQ")
+                    live = data_fetcher.fetch_live_quote(kc, token, exchange_segment="nse_cm")
+                    result = screener.evaluate(symbol, baseline, live, instrument="EQ")
                     if result and state_store.should_alert(symbol, "EQ"):
                         alerts.append(result)
                         state_store.mark_alerted(symbol, "EQ")
@@ -73,9 +76,18 @@ def run_scan(kc, token_map, universe):
             if config.SCAN_FNO:
                 fut_token = data_fetcher.get_fno_token(kc, symbol)
                 if fut_token:
-                    df = data_fetcher.fetch_daily_history(kc, fut_token, exchange_segment="nse_fo")
-                    df = data_fetcher.compute_indicators(df)
-                    result = screener.evaluate(symbol, df, instrument="FUT")
+                    live_fut = data_fetcher.fetch_live_quote(kc, fut_token, exchange_segment="nse_fo")
+                    oi_change_pct = None
+                    if live_fut and live_fut.get("oi") is not None:
+                        prev_oi = state_store.get_previous_oi(symbol)
+                        if prev_oi:
+                            oi_change_pct = (live_fut["oi"] - prev_oi) / prev_oi * 100
+                        state_store.record_oi(symbol, live_fut["oi"])
+                    # Futures technical baseline is approximated from the underlying's
+                    # cash-market history — Kotak doesn't expose historical futures
+                    # candles either, and stock futures track the underlying closely.
+                    result = screener.evaluate(symbol, baseline, live_fut, instrument="FUT",
+                                                oi_change_pct=oi_change_pct)
                     if result and state_store.should_alert(symbol, "FUT"):
                         alerts.append(result)
                         state_store.mark_alerted(symbol, "FUT")
@@ -107,8 +119,10 @@ def main():
     token_map = data_fetcher.build_token_map(kc, universe)
     log.info("Resolved %d/%d symbols to instrument tokens", len(token_map), len(universe))
 
+    yf_baseline = data_fetcher.fetch_yf_baseline_batch(universe)
+
     if args.once:
-        run_scan(kc, token_map, universe)
+        run_scan(kc, token_map, universe, yf_baseline)
         return
 
     log.info("Starting continuous scan loop (every %d min, %s-%s %s)",
@@ -116,7 +130,10 @@ def main():
     while True:
         if is_market_open():
             kc.ensure_session()
-            run_scan(kc, token_map, universe)
+            # Cheap no-op most of the day (cache hit) — only actually re-fetches
+            # from Yahoo Finance once, right after the calendar date rolls over.
+            yf_baseline = data_fetcher.fetch_yf_baseline_batch(universe)
+            run_scan(kc, token_map, universe, yf_baseline)
             time.sleep(config.SCAN_INTERVAL_MINUTES * 60)
         else:
             log.info("Market closed — sleeping 10 min")

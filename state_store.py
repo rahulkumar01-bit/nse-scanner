@@ -37,3 +37,17 @@ def mark_alerted(symbol, instrument):
     key = f"{symbol}:{instrument}"
     state[key] = datetime.now().isoformat()
     _save(state)
+
+
+def get_previous_oi(symbol):
+    """Last open-interest value we recorded for this symbol's front-month
+    future, used to compute day-over-day OI change for the long-buildup
+    check. Returns None if we've never recorded one."""
+    state = _load()
+    return state.get(f"oi:{symbol}")
+
+
+def record_oi(symbol, oi):
+    state = _load()
+    state[f"oi:{symbol}"] = oi
+    _save(state)

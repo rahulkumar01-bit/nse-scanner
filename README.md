@@ -14,19 +14,25 @@ composite of momentum/breakout signals — the kind of behaviour that
 
 ## How the screener works
 
-For each symbol, on each scan cycle, it pulls recent daily candles and scores five independent checks:
+**Data sources, combined:**
+- **Yahoo Finance** supplies the historical daily baseline (20-day avg volume, 20-day high, RSI-14) as of the last *completed* trading day. Kotak's API doesn't expose historical candle data — confirmed against their own SDK docs, which list only live quotes, scrip master, and search under "Market Data," no historical/candle endpoint — so this fills that gap for free. Since this data doesn't change intraday, it's fetched once per calendar day and cached (`data/yf_cache.json`), not re-downloaded on every 10-minute cycle.
+- **Kotak Neo** supplies today's *live* number (LTP, volume-so-far, open interest for futures) via `quotes()`, refreshed every scan cycle.
 
-1. **Day move** — today's close is up ≥ `DAY_CHANGE_PCT_THRESHOLD`% vs prior close
-2. **Volume surge** — today's volume ≥ `VOLUME_SURGE_MULTIPLE`× the 20-day average
-3. **Breakout** — close above the `BREAKOUT_LOOKBACK_DAYS`-day high
-4. **RSI momentum** — RSI(14) above `RSI_MOMENTUM_MIN` and rising
-5. **F&O long buildup** (futures only) — price up alongside a rising open interest
+For each symbol, on each scan cycle, it combines yesterday's baseline with today's live snapshot and scores five independent checks:
+
+1. **Day move** — today's LTP is up ≥ `DAY_CHANGE_PCT_THRESHOLD`% vs yesterday's close
+2. **Volume surge** — today's volume-so-far ≥ `VOLUME_SURGE_MULTIPLE`× the 20-day average
+3. **Breakout** — LTP above the `BREAKOUT_LOOKBACK_DAYS`-day high
+4. **RSI momentum** — RSI(14) *as of yesterday's close* above `RSI_MOMENTUM_MIN` and rising vs the day before (an exact live-updated RSI isn't possible without today's final close)
+5. **F&O long buildup** (futures only) — price up alongside rising open interest vs. the last time the scanner recorded it
 
 A symbol is emailed once it scores at least `MIN_SIGNAL_SCORE` out of 5. All thresholds live in `config.py` — tune them to be stricter/looser. The same symbol won't be re-alerted for `DEDUPE_HOURS` hours.
 
+**Note on futures:** since Kotak doesn't expose historical futures candles either, and stock futures track their underlying's cash price closely, the futures check reuses the *equity's* Yahoo Finance baseline (breakout/RSI/volume-avg) combined with the *futures* contract's live LTP and OI from Kotak. This is a reasonable approximation, not an exact futures-specific technical read.
+
 ## Setup
 
-1. **Get Kotak Neo API access**: log in to Kotak Neo → Invest → Trade API → API Dashboard, generate your consumer key/secret, and register for TOTP (you'll get a base32 secret to scan into an authenticator — save that raw secret, you need it in `.env`).
+1. **Get Kotak Neo API access**: log in to Kotak Neo → Invest → Trade API → API Dashboard, generate your consumer key (a consumer secret is not required by the current SDK), and register for TOTP (you'll get a base32 secret to scan into an authenticator — save that raw secret, you need it in `.env`).
 
 2. **Install dependencies**:
    ```bash

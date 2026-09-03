@@ -1,16 +1,35 @@
 """
-Pulls the instrument master + daily OHLCV history from Kotak Neo and turns
-it into a tidy pandas DataFrame per symbol, with the indicators the
-screener needs (avg volume, ATH/N-day high, RSI) already computed.
+Two data sources, combined:
+
+- Yahoo Finance (yfinance) supplies the historical daily OHLCV baseline
+  (20-day avg volume, 20-day high, RSI-14, previous close) as of the last
+  COMPLETED trading day. Kotak's API doesn't expose historical candle data
+  (confirmed: their SDK's own feature list only lists live quotes, scrip
+  master, and search — no historical/candle endpoint), so this fills that
+  gap with a free source. Since this data doesn't change intraday, it's
+  computed once per calendar day and cached to disk — the scanner runs
+  every 10 minutes, but Yahoo only gets hit once a day per symbol.
+- Kotak Neo supplies today's LIVE number (LTP, volume-so-far, OI for
+  futures) via quotes(), refreshed every scan cycle.
+
+The screener combines "yesterday's baseline" with "today's live snapshot"
+for each check.
 """
+import json
 import logging
+import os
 from datetime import datetime, timedelta
 
 import pandas as pd
+import pytz
+import yfinance as yf
 
 import config
 
 log = logging.getLogger("nse_scanner.data_fetcher")
+
+_IST = pytz.timezone(config.TIMEZONE)
+YF_CACHE_FILE = os.path.join(os.path.dirname(__file__), "data", "yf_cache.json")
 
 
 def load_universe():
@@ -20,20 +39,20 @@ def load_universe():
 
 def _extract_rows(payload):
     """
-    search_scrip() should return a bare list per Kotak's docs, but in
-    practice the response is sometimes wrapped in a dict (e.g. {"data": [...]}
-    or {"result": [...]}) depending on SDK/response-format version. Unwrap
-    defensively instead of assuming either shape.
+    Several Kotak endpoints (search_scrip, quotes) should return a bare list
+    per their docs, but in practice the response is sometimes wrapped in a
+    dict (e.g. {"data": [...]}) depending on SDK/response-format version.
+    Unwrap defensively instead of assuming either shape.
     """
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
-        for key in ("data", "result", "results", "scrips", "list", "Success", "success"):
+        for key in ("data", "result", "results", "scrips", "list", "message",
+                    "Success", "success"):
             val = payload.get(key)
             if isinstance(val, list):
                 return val
-        log.warning("search_scrip() returned an unrecognized dict shape: keys=%s",
-                    list(payload.keys()))
+        log.warning("Unrecognized dict response shape: keys=%s", list(payload.keys()))
     return []
 
 
@@ -58,8 +77,6 @@ def build_token_map(kc, symbols, exchange_segment="nse_cm"):
             sym_name = (row.get("pSymbolName") or "").upper()
             group = (row.get("pGroup") or "").upper()
             token = row.get("pSymbol")
-            # Prefer the plain equity listing (trading symbol "<SYM>-EQ" / group "EQ"),
-            # skipping variants like -BE/-BL/-BZ series.
             if sym_name == symbol and token and (trd_symbol == f"{symbol}-EQ" or group == "EQ"):
                 token_map[symbol] = token
                 break
@@ -94,57 +111,84 @@ def get_fno_token(kc, underlying_symbol):
     return chosen.get("pSymbol") if chosen else None
 
 
-def fetch_daily_history(kc, instrument_token, exchange_segment="nse_cm", lookback_days=90):
-    to_date = datetime.now()
-    from_date = to_date - timedelta(days=lookback_days)
-    raw = kc.historical_data(
-        symbol=None,
-        exchange_segment=exchange_segment,
-        instrument_token=instrument_token,
-        interval="1day",
-        from_date=from_date.strftime("%Y-%m-%d"),
-        to_date=to_date.strftime("%Y-%m-%d"),
-    )
-    candles = raw.get("data", raw) if isinstance(raw, dict) else raw
-    if not candles:
-        return pd.DataFrame()
+def fetch_live_quote(kc, instrument_token, exchange_segment="nse_cm"):
+    """
+    Fetches today's live LTP / volume-so-far / OI from Kotak for a resolved
+    instrument token. Response field names have varied across Kotak SDK
+    versions, so several are tried per field.
+    """
+    try:
+        raw = kc.quotes([{"instrument_token": str(instrument_token), "exchange_segment": exchange_segment}])
+    except Exception:
+        log.exception("quotes() failed for token %s", instrument_token)
+        return None
 
-    df = pd.DataFrame(candles)
-    # Normalize expected columns across possible SDK field-naming variants
-    rename_map = {}
-    for col in df.columns:
-        lc = col.lower()
-        if lc in ("time", "timestamp", "date"):
-            rename_map[col] = "date"
-        elif lc in ("open", "o"):
-            rename_map[col] = "open"
-        elif lc in ("high", "h"):
-            rename_map[col] = "high"
-        elif lc in ("low", "l"):
-            rename_map[col] = "low"
-        elif lc in ("close", "c"):
-            rename_map[col] = "close"
-        elif lc in ("volume", "v"):
-            rename_map[col] = "volume"
-    df = df.rename(columns=rename_map)
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").reset_index(drop=True)
-    for col in ("open", "high", "low", "close", "volume"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df
+    rows = _extract_rows(raw)
+    if not rows and isinstance(raw, dict) and any(
+            k in raw for k in ("last_traded_price", "ltp", "lastTradedPrice")):
+        rows = [raw]
+    if not rows or not isinstance(rows[0], dict):
+        log.warning("quotes() returned an unrecognized shape for token %s: %r", instrument_token, raw)
+        return None
+
+    row = rows[0]
+    ltp = row.get("last_traded_price") or row.get("ltp") or row.get("lastTradedPrice")
+    volume = row.get("volume") or row.get("totalTradedQuantity") or row.get("vol")
+    oi = row.get("open_interest") or row.get("oi") or row.get("openInterest")
+
+    try:
+        ltp = float(ltp)
+    except (TypeError, ValueError):
+        log.warning("quotes() missing a usable LTP for token %s: %r", instrument_token, row)
+        return None
+    try:
+        volume = float(volume) if volume is not None else None
+    except (TypeError, ValueError):
+        volume = None
+    try:
+        oi = float(oi) if oi is not None else None
+    except (TypeError, ValueError):
+        oi = None
+
+    return {"ltp": ltp, "volume": volume, "oi": oi}
 
 
-def compute_indicators(df):
-    """Adds avg_volume_20d, high_20d, rsi_14, turnover_cr_20d columns."""
-    if df.empty or len(df) < config.BREAKOUT_LOOKBACK_DAYS + 1:
-        return df
+def _today_ist_str():
+    return datetime.now(_IST).strftime("%Y-%m-%d")
 
-    df = df.copy()
-    df["avg_volume_20d"] = df["volume"].rolling(20).mean().shift(1)
-    df["high_20d"] = df["high"].rolling(config.BREAKOUT_LOOKBACK_DAYS).max().shift(1)
-    df["turnover_cr"] = (df["close"] * df["volume"]) / 1e7  # INR crore
-    df["avg_turnover_cr_20d"] = df["turnover_cr"].rolling(20).mean().shift(1)
+
+def _load_yf_cache():
+    if not os.path.exists(YF_CACHE_FILE):
+        return {}
+    try:
+        with open(YF_CACHE_FILE) as f:
+            cache = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if cache.get("date") != _today_ist_str():
+        return {}
+    return cache.get("data", {})
+
+
+def _save_yf_cache(data):
+    os.makedirs(os.path.dirname(YF_CACHE_FILE), exist_ok=True)
+    with open(YF_CACHE_FILE, "w") as f:
+        json.dump({"date": _today_ist_str(), "data": data}, f, indent=2)
+
+
+def _compute_baseline_stats(hist):
+    """hist: a yfinance daily OHLCV DataFrame, most recent row = last
+    COMPLETED trading day (today is never in this data)."""
+    df = hist.copy()
+    df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    df = df.rename(columns=str.lower).sort_index()
+    if len(df) < config.BREAKOUT_LOOKBACK_DAYS + 1:
+        return None
+
+    avg_volume_20d = df["volume"].rolling(20).mean().iloc[-1]
+    high_20d = df["high"].rolling(config.BREAKOUT_LOOKBACK_DAYS).max().iloc[-1]
+    turnover = (df["close"] * df["volume"]) / 1e7  # INR crore
+    avg_turnover_cr_20d = turnover.rolling(20).mean().iloc[-1]
 
     delta = df["close"].diff()
     gain = delta.clip(lower=0)
@@ -152,8 +196,61 @@ def compute_indicators(df):
     avg_gain = gain.rolling(config.RSI_PERIOD).mean()
     avg_loss = loss.rolling(config.RSI_PERIOD).mean()
     rs = avg_gain / avg_loss.replace(0, pd.NA)
-    df["rsi_14"] = 100 - (100 / (1 + rs))
+    rsi_series = 100 - (100 / (1 + rs))
+    rsi_14 = rsi_series.iloc[-1]
+    prev_rsi_14 = rsi_series.iloc[-2] if len(rsi_series) > 1 else None
 
-    df["pct_change"] = df["close"].pct_change() * 100
-    df["volume_ratio"] = df["volume"] / df["avg_volume_20d"]
-    return df
+    prev_close = df["close"].iloc[-1]
+
+    for val in (avg_volume_20d, high_20d, avg_turnover_cr_20d, rsi_14, prev_close):
+        if pd.isna(val):
+            return None
+
+    return {
+        "avg_volume_20d": float(avg_volume_20d),
+        "high_20d": float(high_20d),
+        "avg_turnover_cr_20d": float(avg_turnover_cr_20d),
+        "rsi_14": float(rsi_14),
+        "prev_rsi_14": float(prev_rsi_14) if prev_rsi_14 is not None and not pd.isna(prev_rsi_14) else None,
+        "prev_close": float(prev_close),
+    }
+
+
+def fetch_yf_baseline_batch(symbols, lookback_days=90):
+    """
+    Returns {symbol: baseline_stats_dict}, cached to disk for the calendar
+    day (IST) so Yahoo Finance is only hit once per day regardless of how
+    many times the scanner runs.
+    """
+    cache = _load_yf_cache()
+    if cache:
+        log.info("Using cached Yahoo Finance baseline (%d symbols) for %s", len(cache), _today_ist_str())
+        return cache
+
+    log.info("Fetching fresh Yahoo Finance baseline for %d symbols", len(symbols))
+    baseline = {}
+    to_date = datetime.now()
+    from_date = to_date - timedelta(days=lookback_days)
+    for symbol in symbols:
+        try:
+            hist = yf.download(
+                f"{symbol}.NS",
+                start=from_date.strftime("%Y-%m-%d"),
+                end=to_date.strftime("%Y-%m-%d"),
+                progress=False,
+                auto_adjust=False,
+            )
+        except Exception:
+            log.exception("yfinance download failed for %s", symbol)
+            continue
+        if hist is None or hist.empty:
+            log.warning("No Yahoo Finance data for %s.NS", symbol)
+            continue
+
+        stats = _compute_baseline_stats(hist)
+        if stats:
+            baseline[symbol] = stats
+
+    _save_yf_cache(baseline)
+    log.info("Baseline computed for %d/%d symbols", len(baseline), len(symbols))
+    return baseline
