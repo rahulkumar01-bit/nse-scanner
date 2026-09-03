@@ -18,6 +18,25 @@ def load_universe():
     return [s.strip().upper() for s in df["symbol"].tolist()]
 
 
+def _extract_rows(payload):
+    """
+    search_scrip() should return a bare list per Kotak's docs, but in
+    practice the response is sometimes wrapped in a dict (e.g. {"data": [...]}
+    or {"result": [...]}) depending on SDK/response-format version. Unwrap
+    defensively instead of assuming either shape.
+    """
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("data", "result", "results", "scrips", "list", "Success", "success"):
+            val = payload.get(key)
+            if isinstance(val, list):
+                return val
+        log.warning("search_scrip() returned an unrecognized dict shape: keys=%s",
+                    list(payload.keys()))
+    return []
+
+
 def build_token_map(kc, symbols, exchange_segment="nse_cm"):
     """
     Resolves each symbol to its instrument token via search_scrip() (which
@@ -27,12 +46,14 @@ def build_token_map(kc, symbols, exchange_segment="nse_cm"):
     token_map = {}
     for symbol in symbols:
         try:
-            results = kc.search_scrip(exchange_segment=exchange_segment, symbol=symbol)
+            raw = kc.search_scrip(exchange_segment=exchange_segment, symbol=symbol)
         except Exception:
             log.exception("search_scrip failed for %s", symbol)
             continue
 
-        for row in results or []:
+        for row in _extract_rows(raw):
+            if not isinstance(row, dict):
+                continue
             trd_symbol = (row.get("pTrdSymbol") or "").upper()
             sym_name = (row.get("pSymbolName") or "").upper()
             group = (row.get("pGroup") or "").upper()
@@ -52,10 +73,11 @@ def get_fno_token(kc, underlying_symbol):
     contract from the results.
     """
     try:
-        results = kc.search_scrip(exchange_segment="nse_fo", symbol=underlying_symbol, option_type="FUT")
+        raw = kc.search_scrip(exchange_segment="nse_fo", symbol=underlying_symbol, option_type="FUT")
     except Exception:
         log.exception("search_scrip (FUT) failed for %s", underlying_symbol)
         return None
+    results = [r for r in _extract_rows(raw) if isinstance(r, dict)]
     if not results:
         return None
 
