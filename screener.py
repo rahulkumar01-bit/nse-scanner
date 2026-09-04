@@ -8,7 +8,18 @@ trade. Position sizing, stop-losses, and your own judgement are on you.
 
 Each candidate is scored 0-5 on independent checks, combining yesterday's
 baseline stats (from Yahoo Finance) with today's live snapshot (from
-Kotak). A symbol is alerted when the score reaches config.MIN_SIGNAL_SCORE.
+Kotak). A symbol clearing config.MIN_SIGNAL_SCORE then gets a full
+entry/target/stop-loss workup:
+  - Entry: current price, unless the stock looks extended (RSI/distance from
+    its 50-day average), in which case a pullback level is proposed instead.
+  - Stop-loss: the actual recent swing low (real support), capped so it's
+    never unreasonably wide.
+  - Target: the nearest real prior resistance level (52-week/3y/5y/all-time
+    high) that clears your minimum expectation, or a volatility+strength
+    projection if no such level exists.
+A result is only "favorable" (and gets emailed) if the resulting
+risk:reward clears config.MIN_RISK_REWARD_TO_ALERT — otherwise it's
+computed and logged, but no email is sent.
 """
 from datetime import datetime
 
@@ -91,28 +102,73 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None):
     if checks["oi_buildup"]:
         reasons.append(f"open interest up {oi_change_pct:.1f}% (long buildup)")
 
-    entry = ltp
-    atr = baseline.get("atr_14")
+    # --- Entry: is the current price a reasonable entry, or already extended? ---
+    rsi_extended = rsi is not None and rsi >= config.EXTENDED_RSI_THRESHOLD
+    sma_50 = baseline.get("sma_50")
+    pct_above_sma50 = ((ltp - sma_50) / sma_50 * 100) if sma_50 else None
+    ma_extended = pct_above_sma50 is not None and pct_above_sma50 >= config.EXTENDED_MA_DISTANCE_PCT
+    is_extended = rsi_extended or ma_extended
 
+    ema_20 = baseline.get("ema_20")
+    if is_extended and ema_20 and ema_20 < ltp:
+        entry = ema_20
+        extended_bits = []
+        if rsi_extended:
+            extended_bits.append(f"RSI {rsi:.0f}")
+        if ma_extended:
+            extended_bits.append(f"{pct_above_sma50:.0f}% above 50-day average")
+        entry_note = (f"stock looks extended ({', '.join(extended_bits)}) — "
+                      f"proposed entry is a pullback to the 20-day EMA (₹{entry:.2f}), "
+                      f"not today's price (₹{ltp:.2f})")
+    else:
+        entry = ltp
+        entry_note = "current market price"
+
+    # --- Stop-loss: anchored to the actual recent swing low, capped by ATR ---
+    atr = baseline.get("atr_14")
+    swing_low = baseline.get("swing_low")
+    stop_candidates = []
+    if swing_low and swing_low < entry:
+        stop_candidates.append(("recent swing low", swing_low * (1 - config.SWING_LOW_BUFFER_PCT / 100)))
     if atr:
-        # Target scales with both volatility (ATR) and signal strength (score) —
-        # a stronger/more volatile setup gets a more ambitious target — but never
-        # below your stated minimum expectation of TARGET_RETURN_MIN_PCT.
+        stop_candidates.append(("ATR-based cap", entry - config.STOP_LOSS_MAX_ATR_MULTIPLIER * atr))
+    if not stop_candidates:
+        stop_loss = entry * (1 - config.STOP_LOSS_PCT_FALLBACK / 100)
+        stop_basis = "flat % fallback (insufficient history for ATR/swing low)"
+    elif len(stop_candidates) == 1:
+        stop_basis, stop_loss = stop_candidates[0]
+    else:
+        # Use the swing low, but never let it be wider than the ATR-based cap
+        (_, swing_stop), (_, atr_cap) = stop_candidates
+        if swing_stop >= atr_cap:
+            stop_loss, stop_basis = swing_stop, "recent swing low"
+        else:
+            stop_loss, stop_basis = atr_cap, f"ATR cap (swing low was wider than {config.STOP_LOSS_MAX_ATR_MULTIPLIER}x ATR away)"
+    stop_loss = max(stop_loss, 0.01)  # never let logic produce a non-positive price
+
+    # --- Target: prefer real prior resistance over a formula, when one qualifies ---
+    target_from_min_pct = entry * (1 + config.TARGET_RETURN_MIN_PCT / 100)
+    resistance_candidates = [
+        lvl for lvl in (baseline.get("high_52w"), baseline.get("high_3y"),
+                         baseline.get("high_5y"), baseline.get("all_time_high"))
+        if lvl and lvl >= target_from_min_pct
+    ]
+    if resistance_candidates:
+        target = min(resistance_candidates)  # nearest qualifying resistance above entry
+        target_basis = "prior historical resistance"
+    elif atr:
         atr_multiplier = config.TARGET_ATR_BASE_MULTIPLIER + \
             max(0, score - config.MIN_SIGNAL_SCORE) * config.TARGET_ATR_SCORE_STEP
-        target_from_atr = entry + atr_multiplier * atr
-        target_from_min_pct = entry * (1 + config.TARGET_RETURN_MIN_PCT / 100)
-        target = max(target_from_atr, target_from_min_pct)
-        stop_loss = entry - config.STOP_LOSS_ATR_MULTIPLIER * atr
+        target = max(entry + atr_multiplier * atr, target_from_min_pct)
+        target_basis = "volatility/momentum projection (no qualifying resistance level found)"
     else:
-        # Fallback when ATR isn't available (e.g. insufficient history)
-        target = entry * (1 + config.TARGET_RETURN_MIN_PCT / 100)
-        stop_loss = entry * (1 - config.STOP_LOSS_PCT_FALLBACK / 100)
+        target = target_from_min_pct
+        target_basis = "minimum-expectation floor (insufficient data for ATR or resistance)"
 
-    stop_loss = max(stop_loss, 0.01)  # never let a formula produce a non-positive price
     risk = entry - stop_loss
     reward = target - entry
     risk_reward = (reward / risk) if risk > 0 else None
+    favorable = risk_reward is not None and risk_reward >= config.MIN_RISK_REWARD_TO_ALERT
 
     return {
         "symbol": symbol,
@@ -124,7 +180,11 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None):
         "reasons": reasons,
         "date": datetime.now(_IST).strftime("%Y-%m-%d"),
         "entry": round(entry, 2),
+        "entry_note": entry_note,
         "target": round(target, 2),
+        "target_basis": target_basis,
         "stop_loss": round(stop_loss, 2),
+        "stop_basis": stop_basis,
         "risk_reward": round(risk_reward, 2) if risk_reward is not None else None,
+        "favorable": favorable,
     }
