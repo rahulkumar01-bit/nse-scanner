@@ -37,6 +37,43 @@ def _format_email(alerts):
     return "\n".join(lines)
 
 
+def send_heartbeat():
+    """One-time confirmation email verifying the SMTP alert pipeline is
+    wired up correctly, sent on the first no-signal scan cycle so you don't
+    have to wait for a real momentum signal to know mail delivery works.
+
+    Returns True only if the send actually succeeded — the caller should
+    only mark this as "done" on a True, so a misconfigured SMTP setup keeps
+    retrying on subsequent scans instead of silently giving up forever.
+    """
+    if not config.ALERT_TO_EMAILS:
+        log.error("ALERT_TO_EMAILS is empty — cannot send heartbeat email")
+        return False
+
+    body = (
+        "This is a one-time confirmation email from NSE Scanner.\n\n"
+        "It confirms that email alert delivery (SMTP) is configured correctly. "
+        "You will not receive this message again — from here on you'll only be "
+        "emailed when a symbol actually crosses a signal threshold during a scan.\n"
+    )
+    msg = MIMEMultipart()
+    msg["From"] = config.ALERT_FROM_EMAIL
+    msg["To"] = ", ".join(config.ALERT_TO_EMAILS)
+    msg["Subject"] = "NSE Scanner: email delivery confirmed"
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT) as server:
+            server.starttls()
+            server.login(config.SMTP_USER, config.SMTP_PASSWORD)
+            server.sendmail(config.ALERT_FROM_EMAIL, config.ALERT_TO_EMAILS, msg.as_string())
+        log.info("Sent one-time heartbeat confirmation email")
+        return True
+    except Exception:
+        log.exception("Failed to send heartbeat email — will retry next scan cycle")
+        return False
+
+
 def send_alerts(alerts):
     if not alerts:
         return
