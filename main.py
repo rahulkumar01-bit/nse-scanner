@@ -103,6 +103,9 @@ def run_scan(kc, token_map, universe, yf_baseline):
         notifier.send_alerts(alerts)
     else:
         log.info("Scan complete — no signals this cycle")
+        if not state_store.has_sent_heartbeat():
+            if notifier.send_heartbeat():
+                state_store.mark_heartbeat_sent()
 
 
 def main():
