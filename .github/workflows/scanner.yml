@@ -14,7 +14,12 @@ permissions:
   contents: write   # needed to commit the updated dedupe-state file back to the repo
 
 concurrency:
-  group: nse-scanner
+  # Manual test runs (workflow_dispatch) get their own group, separate from
+  # scheduled runs — otherwise a manually triggered run can silently bump a
+  # queued scheduled tick out of the queue (GitHub keeps only the most
+  # recently queued run per concurrency group), starving the cron schedule
+  # on any day with active manual testing.
+  group: nse-scanner-${{ github.event_name }}
   cancel-in-progress: false   # never kill a run that might be mid-scan; let it finish, skip overlap
 
 jobs:
