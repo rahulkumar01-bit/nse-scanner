@@ -76,7 +76,7 @@ STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. i
 # Scan schedule
 # ---------------------------------------------------------------------------
 SCAN_INTERVAL_MINUTES = 15
-MARKET_OPEN = "09:15"
+MARKET_OPEN = "08:45"
 MARKET_CLOSE = "15:30"
 TIMEZONE = "Asia/Kolkata"
 
