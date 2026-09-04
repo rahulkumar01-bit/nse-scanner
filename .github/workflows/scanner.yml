@@ -1,25 +1,21 @@
 name: NSE Momentum Scanner
 
 on:
-  schedule:
-    # All times UTC. IST = UTC+5:30, so 09:15-15:30 IST = 03:45-10:00 UTC.
-    # Runs every 10 minutes during market hours (minutes ending in 5/45,
-    # offset to line up with the 09:15 IST open).
-    - cron: "45,55 3 * * 1-5"            # 09:15, 09:25 IST
-    - cron: "5,15,25,35,45,55 4-9 * * 1-5"  # 09:35 IST through 15:25 IST
-    - cron: "0 10 * * 1-5"               # 15:30 IST (market close)
-  workflow_dispatch: {}             # lets you trigger a manual test run from the Actions tab
+  # GitHub's internal `schedule:` (cron) trigger has been unreliable — see
+  # https://github.com/orgs/community/discussions/185352 and related threads
+  # for widespread 2026 reports of scheduled triggers silently not firing or
+  # drifting by hours, while workflow_dispatch keeps firing reliably. Rather
+  # than fight that, an external scheduler (e.g. cron-job.org) calls the
+  # GitHub REST API to fire workflow_dispatch on a real 10-minute cadence
+  # during market hours instead. If GitHub's scheduler becomes reliable
+  # again, the `schedule:` block below can be restored.
+  workflow_dispatch: {}             # lets you trigger a manual test run from the Actions tab, and is what the external scheduler calls too
 
 permissions:
   contents: write   # needed to commit the updated dedupe-state file back to the repo
 
 concurrency:
-  # Manual test runs (workflow_dispatch) get their own group, separate from
-  # scheduled runs — otherwise a manually triggered run can silently bump a
-  # queued scheduled tick out of the queue (GitHub keeps only the most
-  # recently queued run per concurrency group), starving the cron schedule
-  # on any day with active manual testing.
-  group: nse-scanner-${{ github.event_name }}
+  group: nse-scanner
   cancel-in-progress: false   # never kill a run that might be mid-scan; let it finish, skip overlap
 
 jobs:
