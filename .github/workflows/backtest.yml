@@ -1,0 +1,42 @@
+name: NSE Scanner Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      months:
+        description: 'How many months back to test'
+        required: false
+        default: '6'
+      min_score:
+        description: 'Override MIN_SIGNAL_SCORE (blank = use config.py default of 3)'
+        required: false
+        default: ''
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backtest
+        run: |
+          ARGS="--months ${{ inputs.months }}"
+          if [ -n "${{ inputs.min_score }}" ]; then
+            ARGS="$ARGS --min-score ${{ inputs.min_score }}"
+          fi
+          python backtest.py $ARGS
+
+      - name: Upload full results CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results
+          path: backtest_results.csv
+          if-no-files-found: ignore
