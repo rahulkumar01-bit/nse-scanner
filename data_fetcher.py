@@ -18,6 +18,7 @@ for each check.
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -37,22 +38,38 @@ def load_universe():
     return [s.strip().upper() for s in df["symbol"].tolist()]
 
 
-def _extract_rows(payload):
+def _extract_rows(payload, _depth=0):
     """
     Several Kotak endpoints (search_scrip, quotes) should return a bare list
     per their docs, but in practice the response is sometimes wrapped in a
-    dict (e.g. {"data": [...]}) depending on SDK/response-format version.
-    Unwrap defensively instead of assuming either shape.
+    dict (e.g. {"data": [...]} or {"message": {"data": [...]}}, or a single
+    row without a list wrapper at all). Unwrap defensively, recursing one
+    level into any nested dict, and treat a single scrip/quote-shaped dict
+    as a one-row list.
     """
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
         for key in ("data", "result", "results", "scrips", "list", "message",
                     "Success", "success"):
-            val = payload.get(key)
+            if key not in payload:
+                continue
+            val = payload[key]
             if isinstance(val, list):
                 return val
-        log.warning("Unrecognized dict response shape: keys=%s", list(payload.keys()))
+            if isinstance(val, dict):
+                if any(k.startswith(("p", "l")) for k in val.keys()):
+                    return [val]  # a single scrip/quote row (pSymbol, lExpiryDate, etc.)
+                if _depth < 2:
+                    nested = _extract_rows(val, _depth + 1)
+                    if nested:
+                        return nested
+        if _depth == 0 and payload:
+            try:
+                dumped = json.dumps(payload, default=str)[:1000]
+            except Exception:
+                dumped = repr(payload)[:1000]
+            log.warning("Unrecognized dict response shape (full payload): %s", dumped)
     return []
 
 
@@ -244,36 +261,74 @@ def fetch_yf_baseline_batch(symbols, lookback_days=90):
     Returns {symbol: baseline_stats_dict}, cached to disk for the calendar
     day (IST) so Yahoo Finance is only hit once per day regardless of how
     many times the scanner runs.
+
+    Downloads all symbols in a single batched yfinance call (with retries)
+    rather than ~100+ sequential single-symbol requests — Yahoo Finance
+    intermittently rate-limits/blocks rapid sequential requests, especially
+    from shared cloud IPs like GitHub Actions runners, which shows up as
+    spurious "possibly delisted; no timezone found" errors on symbols that
+    are obviously fine. If the batch still comes back badly incomplete, the
+    partial result is NOT cached, so the next scan cycle retries instead of
+    being stuck with missing symbols for the rest of the day.
     """
     cache = _load_yf_cache()
     if cache:
         log.info("Using cached Yahoo Finance baseline (%d symbols) for %s", len(cache), _today_ist_str())
         return cache
 
-    log.info("Fetching fresh Yahoo Finance baseline for %d symbols", len(symbols))
-    baseline = {}
     to_date = datetime.now()
     from_date = to_date - timedelta(days=lookback_days)
-    for symbol in symbols:
+    tickers = [f"{s}.NS" for s in symbols]
+
+    raw = None
+    for attempt in range(1, config.YF_BATCH_RETRY_ATTEMPTS + 1):
+        log.info("Fetching Yahoo Finance baseline for %d symbols (attempt %d/%d)",
+                 len(symbols), attempt, config.YF_BATCH_RETRY_ATTEMPTS)
         try:
-            hist = yf.download(
-                f"{symbol}.NS",
+            raw = yf.download(
+                tickers=tickers,
                 start=from_date.strftime("%Y-%m-%d"),
                 end=to_date.strftime("%Y-%m-%d"),
+                group_by="ticker",
                 progress=False,
                 auto_adjust=False,
+                threads=True,
             )
+            if raw is not None and not raw.empty:
+                break
         except Exception:
-            log.exception("yfinance download failed for %s", symbol)
-            continue
-        if hist is None or hist.empty:
-            log.warning("No Yahoo Finance data for %s.NS", symbol)
-            continue
+            log.exception("Batched yfinance download failed (attempt %d)", attempt)
+        if attempt < config.YF_BATCH_RETRY_ATTEMPTS:
+            time.sleep(config.YF_BATCH_RETRY_BACKOFF_SEC * attempt)
 
-        stats = _compute_baseline_stats(hist)
-        if stats:
-            baseline[symbol] = stats
+    baseline = {}
+    if raw is not None and not raw.empty:
+        for symbol in symbols:
+            ticker = f"{symbol}.NS"
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    if ticker not in raw.columns.get_level_values(0):
+                        continue
+                    hist = raw[ticker].dropna(how="all")
+                else:
+                    # Only one ticker in the whole universe — flat columns
+                    hist = raw.dropna(how="all")
+            except Exception:
+                continue
+            if hist is None or hist.empty:
+                continue
+            stats = _compute_baseline_stats(hist)
+            if stats:
+                baseline[symbol] = stats
 
-    _save_yf_cache(baseline)
-    log.info("Baseline computed for %d/%d symbols", len(baseline), len(symbols))
+    coverage_pct = (len(baseline) / len(symbols) * 100) if symbols else 0
+    log.info("Baseline computed for %d/%d symbols (%.0f%% coverage)",
+              len(baseline), len(symbols), coverage_pct)
+
+    if coverage_pct >= config.YF_MIN_COVERAGE_PCT:
+        _save_yf_cache(baseline)
+    else:
+        log.warning("Coverage below %.0f%% threshold — not caching, will retry next scan cycle",
+                    config.YF_MIN_COVERAGE_PCT)
+
     return baseline

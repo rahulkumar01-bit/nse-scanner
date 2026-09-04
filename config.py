@@ -37,6 +37,14 @@ ALERT_TO_EMAILS = [e.strip() for e in os.getenv("ALERT_TO_EMAILS", "").split(","
 # edit it to widen or narrow what gets scanned.
 UNIVERSE_FILE = os.path.join(os.path.dirname(__file__), "data", "universe.csv")
 
+# Yahoo Finance baseline fetch resilience — Yahoo intermittently rate-limits
+# rapid sequential requests, especially from shared cloud IPs (e.g. GitHub
+# Actions runners). Fetches are batched into one call with retries, and a
+# badly incomplete result is not cached so the next cycle retries.
+YF_BATCH_RETRY_ATTEMPTS = 3
+YF_BATCH_RETRY_BACKOFF_SEC = 15         # doubles-ish via *attempt multiplier
+YF_MIN_COVERAGE_PCT = 50                # below this % of universe resolved, treat the fetch as failed
+
 SCAN_EQUITIES = True
 SCAN_FNO = True          # also evaluate futures for each underlying that has them — see FNO_MAX_EXPIRIES below
 
@@ -58,7 +66,7 @@ MIN_SIGNAL_SCORE = 3                # out of the 5 checks in screener.py, how ma
 
 # F&O-specific (only used if quote data includes open interest)
 OI_CHANGE_PCT_THRESHOLD = 8.0       # today's OI build-up, in %, for "long buildup" confirmation
-FNO_MAX_EXPIRIES = 2                # scan the current + next N-1 monthly futures expiries, not just front-month
+FNO_MAX_EXPIRIES = 3                # scan the current + next N-1 monthly futures expiries, not just front-month
 
 # ---------------------------------------------------------------------------
 # Entry / target / stop-loss shown in each alert email. These are HEURISTIC
@@ -76,7 +84,7 @@ STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. i
 # Scan schedule
 # ---------------------------------------------------------------------------
 SCAN_INTERVAL_MINUTES = 15
-MARKET_OPEN = "08:45"
+MARKET_OPEN = "09:15"
 MARKET_CLOSE = "15:30"
 TIMEZONE = "Asia/Kolkata"
 
