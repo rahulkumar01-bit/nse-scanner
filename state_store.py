@@ -39,6 +39,23 @@ def mark_alerted(symbol, instrument):
     _save(state)
 
 
+HEARTBEAT_KEY = "__heartbeat_sent__"
+
+
+def has_sent_heartbeat():
+    """True once the one-time 'email delivery confirmed' message has been
+    successfully sent. Used so it fires exactly once (ever), not once per
+    day or once per no-signal cycle."""
+    state = _load()
+    return bool(state.get(HEARTBEAT_KEY))
+
+
+def mark_heartbeat_sent():
+    state = _load()
+    state[HEARTBEAT_KEY] = datetime.now().isoformat()
+    _save(state)
+
+
 def get_previous_oi(oi_key):
     """Last open-interest value recorded for this key (typically
     "SYMBOL:EXPIRY", e.g. "RELIANCE:25SEP"), used to compute day-over-day
