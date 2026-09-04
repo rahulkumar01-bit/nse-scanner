@@ -66,19 +66,38 @@ MIN_SIGNAL_SCORE = 3                # out of the 5 checks in screener.py, how ma
 
 # F&O-specific (only used if quote data includes open interest)
 OI_CHANGE_PCT_THRESHOLD = 8.0       # today's OI build-up, in %, for "long buildup" confirmation
-FNO_MAX_EXPIRIES = 2                # scan the current + next N-1 monthly futures expiries, not just front-month
+FNO_MAX_EXPIRIES = 3                # scan the current + next N-1 monthly futures expiries, not just front-month
 
 # ---------------------------------------------------------------------------
 # Entry / target / stop-loss shown in each alert email. These are HEURISTIC
-# technical levels derived from formulas below — not personalized advice.
-# Position sizing and the final call are yours.
+# technical levels derived from the formulas/logic below — not personalized
+# advice. Position sizing and the final call are yours.
 # ---------------------------------------------------------------------------
-TARGET_RETURN_MIN_PCT = 10.0        # floor: target is never below entry * (1 + this/100) — your minimum expectation
-TARGET_ATR_BASE_MULTIPLIER = 2.5    # target = entry + (this * ATR-14), scaled up further by signal strength below
-TARGET_ATR_SCORE_STEP = 0.5         # each point of signal score above MIN_SIGNAL_SCORE adds this much to the ATR multiplier
+LONG_HISTORY_YEARS = 15             # how far back to pull daily history for long-term levels (52wk/3y/5y/all-time highs)
+
+# Entry: is the stock already extended (late-stage move), or a reasonable entry now?
+EXTENDED_RSI_THRESHOLD = 70.0        # RSI(14) at/above this = overbought
+EXTENDED_MA_DISTANCE_PCT = 12.0      # price this much above its 50-day SMA = stretched
+PULLBACK_EMA_PERIOD = 20             # when extended, proposed entry = this EMA instead of chasing current price
+
+# Stop-loss: anchored to the actual recent swing low (real support), not just a formula
+SWING_LOW_LOOKBACK_DAYS = 20
+SWING_LOW_BUFFER_PCT = 1.0           # stop sits this much below the swing low, not exactly on it
+STOP_LOSS_ATR_MULTIPLIER = 1.5       # fallback/cap basis: stop = entry - (this * ATR-14)
+STOP_LOSS_MAX_ATR_MULTIPLIER = 3.0   # never let the swing-low stop be wider than this many ATRs from entry
+STOP_LOSS_PCT_FALLBACK = 4.0         # used only if ATR AND swing low are both unavailable
 ATR_PERIOD = 14
-STOP_LOSS_ATR_MULTIPLIER = 1.5      # stop = entry - (this * ATR-14); wider ATR = more room, tighter = less
-STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. insufficient history)
+
+# Target: prefer real prior resistance (52wk/3y/5y/all-time high) over a formula, when
+# one exists above entry and clears your minimum — else fall back to a volatility+
+# signal-strength projection, same idea as before.
+TARGET_RETURN_MIN_PCT = 10.0        # floor: target is never below entry * (1 + this/100) — your minimum expectation
+TARGET_ATR_BASE_MULTIPLIER = 2.5    # fallback formula: entry + (this * ATR-14), scaled up further by signal strength
+TARGET_ATR_SCORE_STEP = 0.5         # each point of signal score above MIN_SIGNAL_SCORE adds this much to the ATR multiplier
+
+# Only actually email when the resulting risk:reward clears this bar — otherwise the
+# setup is logged (visible in the Actions run log) but no email is sent.
+MIN_RISK_REWARD_TO_ALERT = 1.5
 
 # ---------------------------------------------------------------------------
 # Scan schedule
