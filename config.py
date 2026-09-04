@@ -58,7 +58,7 @@ MIN_SIGNAL_SCORE = 3                # out of the 5 checks in screener.py, how ma
 
 # F&O-specific (only used if quote data includes open interest)
 OI_CHANGE_PCT_THRESHOLD = 8.0       # today's OI build-up, in %, for "long buildup" confirmation
-FNO_MAX_EXPIRIES = 3                # scan the current + next N-1 monthly futures expiries, not just front-month
+FNO_MAX_EXPIRIES = 2                # scan the current + next N-1 monthly futures expiries, not just front-month
 
 # ---------------------------------------------------------------------------
 # Entry / target / stop-loss shown in each alert email. These are HEURISTIC
