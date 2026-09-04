@@ -39,15 +39,15 @@ def mark_alerted(symbol, instrument):
     _save(state)
 
 
-def get_previous_oi(symbol):
-    """Last open-interest value we recorded for this symbol's front-month
-    future, used to compute day-over-day OI change for the long-buildup
-    check. Returns None if we've never recorded one."""
+def get_previous_oi(oi_key):
+    """Last open-interest value recorded for this key (typically
+    "SYMBOL:EXPIRY", e.g. "RELIANCE:25SEP"), used to compute day-over-day
+    OI change for the long-buildup check. Returns None if never recorded."""
     state = _load()
-    return state.get(f"oi:{symbol}")
+    return state.get(f"oi:{oi_key}")
 
 
-def record_oi(symbol, oi):
+def record_oi(oi_key, oi):
     state = _load()
-    state[f"oi:{symbol}"] = oi
+    state[f"oi:{oi_key}"] = oi
     _save(state)

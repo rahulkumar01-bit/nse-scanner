@@ -83,20 +83,22 @@ def build_token_map(kc, symbols, exchange_segment="nse_cm"):
     return token_map
 
 
-def get_fno_token(kc, underlying_symbol):
+def get_fno_tokens(kc, underlying_symbol, max_expiries=None):
     """
-    Resolves the nearest-expiry futures instrument token for an underlying
-    via search_scrip(..., option_type="FUT"), picking the closest unexpired
-    contract from the results.
+    Resolves the N nearest unexpired monthly futures contracts for an
+    underlying via search_scrip(..., option_type="FUT"). Returns a list of
+    (expiry_label, instrument_token) tuples, nearest expiry first —
+    e.g. [("25SEP", 51234), ("30OCT", 51298), ("27NOV", 51350)].
     """
+    max_expiries = max_expiries or config.FNO_MAX_EXPIRIES
     try:
         raw = kc.search_scrip(exchange_segment="nse_fo", symbol=underlying_symbol, option_type="FUT")
     except Exception:
         log.exception("search_scrip (FUT) failed for %s", underlying_symbol)
-        return None
+        return []
     results = [r for r in _extract_rows(raw) if isinstance(r, dict)]
     if not results:
-        return None
+        return []
 
     def expiry_epoch(row):
         try:
@@ -107,8 +109,18 @@ def get_fno_token(kc, underlying_symbol):
     now_epoch = datetime.now().timestamp()
     future = [r for r in results if expiry_epoch(r) >= now_epoch]
     future.sort(key=expiry_epoch)
-    chosen = future[0] if future else None
-    return chosen.get("pSymbol") if chosen else None
+
+    out = []
+    for row in future[:max_expiries]:
+        token = row.get("pSymbol")
+        if not token:
+            continue
+        try:
+            label = datetime.fromtimestamp(expiry_epoch(row)).strftime("%d%b").upper()
+        except (ValueError, OverflowError):
+            label = "UNKNOWN"
+        out.append((label, token))
+    return out
 
 
 def fetch_live_quote(kc, instrument_token, exchange_segment="nse_cm"):
@@ -202,6 +214,16 @@ def _compute_baseline_stats(hist):
 
     prev_close = df["close"].iloc[-1]
 
+    # ATR-14: average true range, used for volatility-scaled target/stop-loss
+    prior_close = df["close"].shift(1)
+    true_range = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prior_close).abs(),
+        (df["low"] - prior_close).abs(),
+    ], axis=1).max(axis=1)
+    atr_series = true_range.rolling(config.ATR_PERIOD).mean()
+    atr_14 = atr_series.iloc[-1]
+
     for val in (avg_volume_20d, high_20d, avg_turnover_cr_20d, rsi_14, prev_close):
         if pd.isna(val):
             return None
@@ -213,6 +235,7 @@ def _compute_baseline_stats(hist):
         "rsi_14": float(rsi_14),
         "prev_rsi_14": float(prev_rsi_14) if prev_rsi_14 is not None and not pd.isna(prev_rsi_14) else None,
         "prev_close": float(prev_close),
+        "atr_14": float(atr_14) if not pd.isna(atr_14) else None,
     }
 
 

@@ -91,6 +91,29 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None):
     if checks["oi_buildup"]:
         reasons.append(f"open interest up {oi_change_pct:.1f}% (long buildup)")
 
+    entry = ltp
+    atr = baseline.get("atr_14")
+
+    if atr:
+        # Target scales with both volatility (ATR) and signal strength (score) —
+        # a stronger/more volatile setup gets a more ambitious target — but never
+        # below your stated minimum expectation of TARGET_RETURN_MIN_PCT.
+        atr_multiplier = config.TARGET_ATR_BASE_MULTIPLIER + \
+            max(0, score - config.MIN_SIGNAL_SCORE) * config.TARGET_ATR_SCORE_STEP
+        target_from_atr = entry + atr_multiplier * atr
+        target_from_min_pct = entry * (1 + config.TARGET_RETURN_MIN_PCT / 100)
+        target = max(target_from_atr, target_from_min_pct)
+        stop_loss = entry - config.STOP_LOSS_ATR_MULTIPLIER * atr
+    else:
+        # Fallback when ATR isn't available (e.g. insufficient history)
+        target = entry * (1 + config.TARGET_RETURN_MIN_PCT / 100)
+        stop_loss = entry * (1 - config.STOP_LOSS_PCT_FALLBACK / 100)
+
+    stop_loss = max(stop_loss, 0.01)  # never let a formula produce a non-positive price
+    risk = entry - stop_loss
+    reward = target - entry
+    risk_reward = (reward / risk) if risk > 0 else None
+
     return {
         "symbol": symbol,
         "instrument": instrument,
@@ -100,4 +123,8 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None):
         "max_score": len(checks),
         "reasons": reasons,
         "date": datetime.now(_IST).strftime("%Y-%m-%d"),
+        "entry": round(entry, 2),
+        "target": round(target, 2),
+        "stop_loss": round(stop_loss, 2),
+        "risk_reward": round(risk_reward, 2) if risk_reward is not None else None,
     }

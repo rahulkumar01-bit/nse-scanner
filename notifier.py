@@ -8,10 +8,11 @@ import config
 log = logging.getLogger("nse_scanner.notifier")
 
 DISCLAIMER = (
-    "This is an automated technical screener, not investment advice. "
-    "It flags heuristic price/volume patterns; it does not predict returns "
-    "and past patterns do not guarantee future moves. Verify independently "
-    "and manage your own risk before acting."
+    "This is an automated technical screener, not investment advice. Entry/target/"
+    "stop-loss below are formula-derived heuristic levels (based on volatility and "
+    "signal strength), not a personalized recommendation — they don't predict "
+    "returns, and past patterns don't guarantee future moves. Verify independently, "
+    "size your position appropriately, and manage your own risk before acting."
 )
 
 
@@ -24,6 +25,12 @@ def _format_email(alerts):
         )
         for r in a["reasons"]:
             lines.append(f"    - {r}")
+        if a.get("entry") is not None:
+            rr = f", R:R {a['risk_reward']}" if a.get("risk_reward") is not None else ""
+            lines.append(
+                f"    Entry ₹{a['entry']}  |  Target ₹{a['target']}  |  "
+                f"Stop-loss ₹{a['stop_loss']}{rr}"
+            )
         lines.append("")
     lines.append("-" * 60)
     lines.append(DISCLAIMER)

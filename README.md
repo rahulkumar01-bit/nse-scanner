@@ -28,7 +28,13 @@ For each symbol, on each scan cycle, it combines yesterday's baseline with today
 
 A symbol is emailed once it scores at least `MIN_SIGNAL_SCORE` out of 5. All thresholds live in `config.py` — tune them to be stricter/looser. The same symbol won't be re-alerted for `DEDUPE_HOURS` hours.
 
-**Note on futures:** since Kotak doesn't expose historical futures candles either, and stock futures track their underlying's cash price closely, the futures check reuses the *equity's* Yahoo Finance baseline (breakout/RSI/volume-avg) combined with the *futures* contract's live LTP and OI from Kotak. This is a reasonable approximation, not an exact futures-specific technical read.
+**Note on futures:** since Kotak doesn't expose historical futures candles either, and stock futures track their underlying's cash price closely, the futures check reuses the *equity's* Yahoo Finance baseline (breakout/RSI/volume-avg) combined with each *futures contract's* own live LTP and OI from Kotak. This is a reasonable approximation, not an exact futures-specific technical read. The scanner checks the current month plus the next `FNO_MAX_EXPIRIES - 1` monthly expiries (default 3 total), each evaluated and alerted independently — so a signal might fire on the October contract while September doesn't, or vice versa.
+
+**Entry / target / stop-loss:** each alert email includes formula-derived levels, not personalized advice:
+- **Entry** = the live price (LTP) at the moment the alert fires.
+- **Stop-loss** = entry minus `STOP_LOSS_ATR_MULTIPLIER` × ATR-14 (the stock's own 14-day average true range) — falls back to a flat `STOP_LOSS_PCT_FALLBACK`% if ATR can't be computed.
+- **Target** = scales with both volatility and signal strength: `entry + (base ATR multiplier + bonus per point of signal score above the minimum) × ATR-14`, but never below your stated floor of `TARGET_RETURN_MIN_PCT`% (default 10%). A stronger, more volatile setup gets a more ambitious target than a marginal one; your 10% is a minimum, not a ceiling.
+- The email also shows the resulting risk:reward ratio. All of this is tunable in `config.py`.
 
 ## Setup
 

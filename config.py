@@ -38,7 +38,7 @@ ALERT_TO_EMAILS = [e.strip() for e in os.getenv("ALERT_TO_EMAILS", "").split(","
 UNIVERSE_FILE = os.path.join(os.path.dirname(__file__), "data", "universe.csv")
 
 SCAN_EQUITIES = True
-SCAN_FNO = True          # also evaluate the current-month futures for each underlying that has one
+SCAN_FNO = True          # also evaluate futures for each underlying that has them — see FNO_MAX_EXPIRIES below
 
 # ---------------------------------------------------------------------------
 # Screener thresholds — this is a HEURISTIC technical scanner, not a
@@ -58,6 +58,19 @@ MIN_SIGNAL_SCORE = 3                # out of the 5 checks in screener.py, how ma
 
 # F&O-specific (only used if quote data includes open interest)
 OI_CHANGE_PCT_THRESHOLD = 8.0       # today's OI build-up, in %, for "long buildup" confirmation
+FNO_MAX_EXPIRIES = 3                # scan the current + next N-1 monthly futures expiries, not just front-month
+
+# ---------------------------------------------------------------------------
+# Entry / target / stop-loss shown in each alert email. These are HEURISTIC
+# technical levels derived from formulas below — not personalized advice.
+# Position sizing and the final call are yours.
+# ---------------------------------------------------------------------------
+TARGET_RETURN_MIN_PCT = 10.0        # floor: target is never below entry * (1 + this/100) — your minimum expectation
+TARGET_ATR_BASE_MULTIPLIER = 2.5    # target = entry + (this * ATR-14), scaled up further by signal strength below
+TARGET_ATR_SCORE_STEP = 0.5         # each point of signal score above MIN_SIGNAL_SCORE adds this much to the ATR multiplier
+ATR_PERIOD = 14
+STOP_LOSS_ATR_MULTIPLIER = 1.5      # stop = entry - (this * ATR-14); wider ATR = more room, tighter = less
+STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. insufficient history)
 
 # ---------------------------------------------------------------------------
 # Scan schedule

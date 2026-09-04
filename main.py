@@ -74,23 +74,26 @@ def run_scan(kc, token_map, universe, yf_baseline):
                         state_store.mark_alerted(symbol, "EQ")
 
             if config.SCAN_FNO:
-                fut_token = data_fetcher.get_fno_token(kc, symbol)
-                if fut_token:
+                # Scans the current + next few monthly expiries (config.FNO_MAX_EXPIRIES),
+                # not just the front month, since you're interested in later months too.
+                for expiry_label, fut_token in data_fetcher.get_fno_tokens(kc, symbol):
+                    instrument_label = f"FUT-{expiry_label}"
                     live_fut = data_fetcher.fetch_live_quote(kc, fut_token, exchange_segment="nse_fo")
                     oi_change_pct = None
                     if live_fut and live_fut.get("oi") is not None:
-                        prev_oi = state_store.get_previous_oi(symbol)
+                        oi_key = f"{symbol}:{expiry_label}"
+                        prev_oi = state_store.get_previous_oi(oi_key)
                         if prev_oi:
                             oi_change_pct = (live_fut["oi"] - prev_oi) / prev_oi * 100
-                        state_store.record_oi(symbol, live_fut["oi"])
+                        state_store.record_oi(oi_key, live_fut["oi"])
                     # Futures technical baseline is approximated from the underlying's
                     # cash-market history — Kotak doesn't expose historical futures
                     # candles either, and stock futures track the underlying closely.
-                    result = screener.evaluate(symbol, baseline, live_fut, instrument="FUT",
+                    result = screener.evaluate(symbol, baseline, live_fut, instrument=instrument_label,
                                                 oi_change_pct=oi_change_pct)
-                    if result and state_store.should_alert(symbol, "FUT"):
+                    if result and state_store.should_alert(symbol, instrument_label):
                         alerts.append(result)
-                        state_store.mark_alerted(symbol, "FUT")
+                        state_store.mark_alerted(symbol, instrument_label)
 
         except Exception:
             log.exception("Error screening %s", symbol)
