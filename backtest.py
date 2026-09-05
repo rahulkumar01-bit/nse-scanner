@@ -192,10 +192,27 @@ def summarize(results, label, key_prefix):
           f"Timed out: {timeouts} ({timeouts/len(filled)*100:.0f}%)")
     print(f"  Avg return: {statistics.mean(returns):+.2f}%  |  Median: {statistics.median(returns):+.2f}%  |  "
           f"Best: {max(returns):+.2f}%  |  Worst: {min(returns):+.2f}%")
+    if len(filled) <= 30:
+        print(f"  (Sample size is small ({len(filled)}) — treat these percentages as indicative, not conclusive.)")
     compounded = 1.0
     for r in returns:
         compounded *= (1 + r / 100)
-    print(f"  Equal-sized-bet cumulative multiple across all signals (no compounding logic beyond this): {compounded:.2f}x")
+    if len(filled) > 100:
+        print(f"  [Cumulative multiple omitted for n={len(filled)}: naive sequential compounding across this many "
+              f"overlapping-in-time signals doesn't reflect a deployable portfolio — ignore multiples like this at "
+              f"large sample sizes, they're not a realistic return estimate.]")
+    else:
+        print(f"  Equal-sized-bet cumulative multiple across all signals (no compounding logic beyond this): {compounded:.2f}x")
+
+
+def summarize_combined_filter(results, min_score, min_rr):
+    """Directly tests the actual proposed live config (both filters applied
+    together) rather than inferring it from two separate single-dimension
+    breakdowns, which don't necessarily combine additively."""
+    subset = [r for r in results if r["score"] >= min_score and
+              (r.get("new_risk_reward") is not None and r["new_risk_reward"] >= min_rr)]
+    summarize(subset, f"Combined filter — score >= {min_score} AND R:R >= {min_rr} "
+                       f"({len(subset)}/{len(results)} signals, the actual proposed live config)", "new")
 
 
 def summarize_by_method(results):
@@ -307,6 +324,7 @@ def main():
     print("\nNEW method broken down by amount of historical precedent (does more matching past setups predict better outcomes?):")
     summarize_by_sample_size(all_results)
     summarize_risk_reward(all_results)
+    summarize_combined_filter(all_results, original_min_score, original_min_rr or 0)
 
     extended = [r for r in all_results if r["extended"]]
     print(f"\n{len(extended)} of {len(all_results)} signals were flagged 'extended' "

@@ -62,9 +62,13 @@ VOLUME_SURGE_MULTIPLE = 2.5        # today's volume vs 20-day average volume
 BREAKOUT_LOOKBACK_DAYS = 20         # "N-day high" breakout lookback
 RSI_PERIOD = 14
 RSI_MOMENTUM_MIN = 60               # RSI should be above this and rising
-MIN_SIGNAL_SCORE = 4                # out of the 5 checks in screener.py, how many must fire to alert
-                                     # (was 3 — raised after backtesting to require stronger confluence; re-run the
-                                     # backtest's new summarize_by_score() breakdown to confirm this is the right bar)
+MIN_SIGNAL_SCORE = 3                # out of the 5 checks in screener.py, how many must fire to alert
+                                     # (backtested across scores 1-5 on a 3151-signal sample: score=3 was the clear
+                                     # best performer — +0.46% avg return, 37% target-hit rate, tightest worst-case.
+                                     # score=4 was WORSE despite the stricter bar (70% stop rate on n=19) — more
+                                     # confluence didn't mean better setups here, likely because requiring near-
+                                     # unanimous signals sometimes just means the move is already extended/climactic,
+                                     # not healthier. Don't raise this again without similar evidence.)
 
 # F&O-specific (only used if quote data includes open interest)
 OI_CHANGE_PCT_THRESHOLD = 8.0       # today's OI build-up, in %, for "long buildup" confirmation
@@ -84,11 +88,12 @@ TARGET_ATR_SCORE_STEP = 0.5         # each point of signal score above MIN_SIGNA
 ATR_PERIOD = 14
 STOP_LOSS_ATR_MULTIPLIER = 1.5      # stop = entry - (this * ATR-14); wider ATR = more room, tighter = less
 STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. insufficient history)
-MIN_RISK_REWARD_TO_ALERT = 2.0      # only alert on setups where (target-entry)/(entry-stop) >= 2.0, skipping weaker-odds
-                                     # setups entirely. Backtesting showed R:R>=1.0 and >=1.5 barely moved average
-                                     # return (most signals already cleared those bars), but R:R>=2.0 nearly doubled
-                                     # it (+0.47% -> +0.85% per trade) — at the cost of firing on only ~23% as many
-                                     # signals. Set to None to disable and alert regardless of R:R.
+MIN_RISK_REWARD_TO_ALERT = 1.5      # only alert on setups where (target-entry)/(entry-stop) >= 1.5, skipping weaker-odds
+                                     # setups entirely. Backtested on a 3151-signal sample: R:R>=1.0 barely moved avg
+                                     # return (+0.05%, most signals already clear it), R:R>=1.5 captured most of the
+                                     # real improvement (+0.20%) at 64% of volume, and R:R>=2.0 only added another
+                                     # +0.02% while cutting volume roughly in half again — diminishing returns past
+                                     # 1.5. Set to None to disable and alert regardless of R:R.
 
 # ---------------------------------------------------------------------------
 # Long-term historical analysis (up to LONG_HISTORY_YEARS of daily data per
