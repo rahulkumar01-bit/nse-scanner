@@ -41,8 +41,8 @@ import config
 import data_fetcher
 import screener
 
-ENTRY_FILL_WINDOW_DAYS = 5
-FORWARD_WINDOW_DAYS = 10
+ENTRY_FILL_WINDOW_DAYS = 10  # widened: pullback entries are now the common case, need realistic time to fill
+FORWARD_WINDOW_DAYS = 15     # widened: reduces the "still open" bucket, gives clearer win-rate signal
 MIN_HISTORY_ROWS = 260  # ~1 trading year, needed before baseline stats are meaningful
 
 
