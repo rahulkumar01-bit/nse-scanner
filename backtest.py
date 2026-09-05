@@ -1,37 +1,38 @@
 """
-Backtests the EXACT live screening logic (data_fetcher._compute_baseline_stats
-+ screener.evaluate — imported and called directly, not reimplemented) against
-real historical data, so you can see how often it would actually have fired
-and roughly how those signals would have played out.
+Walk-forward backtest of the momentum screener over a trailing window
+(default: 6 months), comparing:
 
-READ THIS BEFORE TRUSTING THE NUMBERS:
-- Equities only. The F&O long-buildup check needs live open interest, which
-  has no free historical source, so it can't be backtested — this only tests
-  the SCAN_EQUITIES path. Since F&O evaluation reuses the same equity
-  baseline for its own technical checks, equity signal frequency is a
-  reasonable proxy for how often the underlying SETUP occurs, but the actual
-  count of emailed alerts (EQ + multiple FUT expiries) could run higher.
-- Uses each day's actual close/volume as a stand-in for "today's live
-  snapshot." The live scanner sees partial-day volume/price building through
-  the session; backtesting can only use end-of-day figures, so a signal
-  might have fired at a different point intraday in reality.
-- Fill simulation: a "current market price" entry is assumed filled the same
-  day. A pullback entry (extended-stock case) only counts as filled if price
-  actually trades down to that level within ENTRY_FILL_WINDOW_DAYS — if it
-  never pulls back, that signal is recorded as "not_filled", a real and
-  common outcome for a limit-style entry.
-- "Win" = target hit before stop-loss within FORWARD_WINDOW_DAYS of fill,
-  checked day-by-day using each day's high/low. If a single day's range
-  covers both target and stop, we can't tell which happened first from daily
-  bars alone — recorded as "ambiguous_same_day" rather than guessed.
-- This estimates historical frequency and hit-rate of a rule-based screen.
-  It is not a promise about future performance.
+  OLD method — flat ATR-multiplier target/stop, always "enter" at the live
+              price (this is what screener.py did before the entry/target/
+              stop-loss redesign).
+  NEW method — extension-aware entry (proposes a pullback instead of
+              chasing when the move already looks late-stage) and
+              pattern/ATR-based target/stop, grounded in each stock's own
+              historical behaviour where enough precedent exists.
+
+Reuses the ACTUAL production functions (screener.evaluate, screener._propose_
+entry/_propose_target_stop, data_fetcher._compute_long_term_stats etc.) —
+this exercises the real code path, not a parallel reimplementation that
+could silently drift from what actually runs live.
+
+No lookahead: at simulated "day t", only price history strictly BEFORE day t
+is used to compute the baseline and long-term stats — exactly mirroring how
+the live scanner only ever sees yesterday's completed data plus today's
+live tick. Long-term stats are recomputed every LONG_TERM_REFRESH_EVERY
+trading days (mirroring the weekly production cache), not every single day —
+both for realism and because recomputing a 15-year pivot/backtest analysis
+for every day would be needlessly slow.
+
+Needs network access to Yahoo Finance (yfinance) — run this locally or as a
+GitHub Actions job. It will NOT run in a fully offline sandbox.
 
 Usage:
     python backtest.py --months 6
-    python backtest.py --months 12 --min-score 2      # loosen threshold to compare
+    python backtest.py --months 6 --symbols RELIANCE,TCS,INFY   # quick subset
 """
 import argparse
+import json
+import statistics
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -41,163 +42,204 @@ import config
 import data_fetcher
 import screener
 
-ENTRY_FILL_WINDOW_DAYS = 10  # widened: pullback entries are now the common case, need realistic time to fill
-FORWARD_WINDOW_DAYS = 15     # widened: reduces the "still open" bucket, gives clearer win-rate signal
-MIN_HISTORY_ROWS = 260  # ~1 trading year, needed before baseline stats are meaningful
+MAX_HOLDING_DAYS = 7         # matches the actual intended holding window (see config.HOLDING_PERIOD_DAYS) — time-based
+                             # exit if neither target nor stop hits within this many trading days
+FILL_WINDOW_DAYS = 3         # a pullback entry needs to fill fast to still be relevant for a ~week-long trade
+LONG_TERM_REFRESH_EVERY = 5  # trading days between long-term-stats recomputation (mirrors the weekly production cache)
 
 
-def download_full_history(symbols, years_back):
-    tickers = [f"{s}.NS" for s in symbols]
-    end = datetime.now()
-    start = end - timedelta(days=years_back * 365)
-    print(f"Downloading {len(symbols)} symbols, {years_back}y history each...")
-    raw = yf.download(
-        tickers=tickers,
-        start=start.strftime("%Y-%m-%d"),
-        end=end.strftime("%Y-%m-%d"),
-        group_by="ticker",
-        progress=False,
-        auto_adjust=False,
-        threads=True,
-    )
-    out = {}
-    for symbol in symbols:
-        ticker = f"{symbol}.NS"
-        try:
-            if isinstance(raw.columns, pd.MultiIndex):
-                if ticker not in raw.columns.get_level_values(0):
-                    continue
-                hist = raw[ticker].dropna(how="all")
-            else:
-                hist = raw.dropna(how="all")
-        except Exception:
-            continue
-        if hist is None or hist.empty:
-            continue
-        df = hist.copy()
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-        df = df.rename(columns=str.lower).sort_index()
-        out[symbol] = df
-    return out
+def _prep_history(hist):
+    df = hist.copy()
+    df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    df = df.rename(columns=str.lower).sort_index()
+    return df.dropna(subset=["open", "high", "low", "close", "volume"])
 
 
-def simulate_symbol(symbol, df, start_idx):
-    """
-    Walks each day in [start_idx, len(df)-1). At day i, baseline is computed
-    from df.iloc[:i] (everything strictly before day i — identical to how
-    the live scanner treats "yesterday and earlier"), and day i's own
-    close/volume stand in for "today's live snapshot". This reuses the
-    actual production functions, so results reflect the real logic exactly.
-    """
-    results = []
+def _rolling_baseline_series(df):
+    """Vectorized equivalent of data_fetcher._compute_baseline_stats, as a
+    full time series so per-day backtest lookups are just indexing."""
+    return pd.DataFrame({
+        "avg_volume_20d": df["volume"].rolling(20).mean(),
+        "high_20d": df["high"].rolling(config.BREAKOUT_LOOKBACK_DAYS).max(),
+        "avg_turnover_cr_20d": ((df["close"] * df["volume"]) / 1e7).rolling(20).mean(),
+        "rsi_14": (rsi := data_fetcher._rsi_series(df["close"], config.RSI_PERIOD)),
+        "prev_rsi_14": rsi.shift(1),
+        "prev_close": df["close"],
+        "atr_14": data_fetcher._atr_series(df, config.ATR_PERIOD),
+    })
+
+
+def _simulate_forward(df, fill_idx, entry, target, stop_loss):
+    """Walk forward up to MAX_HOLDING_DAYS bars from fill_idx. Conservative
+    convention: if a single day's range spans both target and stop, assume
+    the stop triggers first (worst case, not best case)."""
     n = len(df)
-    for i in range(start_idx, n - 1):
-        baseline = data_fetcher._compute_baseline_stats(df.iloc[:i])
-        if not baseline:
-            continue
-        today_row = df.iloc[i]
-        live = {"ltp": float(today_row["close"]), "volume": float(today_row["volume"]), "oi": None}
+    for offset in range(1, MAX_HOLDING_DAYS + 1):
+        i = fill_idx + offset
+        if i >= n:
+            break
+        lo, hi = df["low"].iloc[i], df["high"].iloc[i]
+        if lo <= stop_loss:
+            return "stop", (stop_loss / entry - 1) * 100, offset
+        if hi >= target:
+            return "target", (target / entry - 1) * 100, offset
+    exit_idx = min(fill_idx + MAX_HOLDING_DAYS, n - 1)
+    return "timeout", (df["close"].iloc[exit_idx] / entry - 1) * 100, exit_idx - fill_idx
 
-        result = screener.evaluate(symbol, baseline, live, instrument="EQ")
-        if not result:
+
+def _find_fill(df, signal_idx, proposed_entry, ltp):
+    """For a pullback entry (proposed_entry < ltp), look forward up to
+    FILL_WINDOW_DAYS for the first day price actually traded down to it —
+    a proposed pullback isn't a guaranteed fill in real trading, and the
+    backtest shouldn't pretend otherwise."""
+    if proposed_entry >= ltp - 1e-9:
+        return signal_idx, proposed_entry  # immediate entry, same bar as the signal
+    n = len(df)
+    for offset in range(1, FILL_WINDOW_DAYS + 1):
+        i = signal_idx + offset
+        if i >= n:
+            break
+        if df["low"].iloc[i] <= proposed_entry:
+            return i, proposed_entry
+    return None, None
+
+
+def old_target_stop(entry, atr, score):
+    """Reproduces the pre-redesign flat ATR-multiplier method, so its
+    hypothetical performance can be compared directly against the new one."""
+    if atr:
+        atr_multiplier = config.TARGET_ATR_BASE_MULTIPLIER + \
+            max(0, score - config.MIN_SIGNAL_SCORE) * config.TARGET_ATR_SCORE_STEP
+        target = max(entry + atr_multiplier * atr, entry * (1 + config.TARGET_RETURN_MIN_PCT / 100))
+        stop_loss = entry - config.STOP_LOSS_ATR_MULTIPLIER * atr
+    else:
+        target = entry * (1 + config.TARGET_RETURN_MIN_PCT / 100)
+        stop_loss = entry * (1 - config.STOP_LOSS_PCT_FALLBACK / 100)
+    return target, max(stop_loss, 0.01)
+
+
+def backtest_symbol(symbol, hist, months):
+    df = _prep_history(hist)
+    if len(df) < 300:
+        return []  # not enough history for baseline + long-term stats to mean anything
+
+    baseline_series = _rolling_baseline_series(df)
+    cutoff = df.index.max() - pd.Timedelta(days=int(months * 30.44))
+    start_idx = max(int(df.index.searchsorted(cutoff)), config.BREAKOUT_LOOKBACK_DAYS + 5)
+
+    results = []
+    long_term_snapshot, long_term_computed_at = None, -999
+
+    for t in range(start_idx, len(df) - 1):
+        if long_term_snapshot is None or t - long_term_computed_at >= LONG_TERM_REFRESH_EVERY:
+            try:
+                long_term_snapshot = data_fetcher._compute_long_term_stats(df.iloc[:t])
+            except Exception:
+                long_term_snapshot = None
+            long_term_computed_at = t
+
+        b = baseline_series.iloc[t - 1]
+        if b.isna().any():
+            continue
+        baseline = b.to_dict()
+        live = {"ltp": df["close"].iloc[t], "volume": df["volume"].iloc[t], "oi": None}
+
+        sig = screener.evaluate(symbol, baseline, live, long_term=long_term_snapshot)
+        if not sig:
             continue
 
-        result["_signal_date"] = df.index[i]
-        result["_signal_idx"] = i
-        results.append(result)
+        # NEW method — respect whether a proposed pullback would actually have filled
+        fill_idx, fill_price = _find_fill(df, t, sig["entry"], live["ltp"])
+        if fill_idx is not None:
+            outcome, ret_pct, days = _simulate_forward(df, fill_idx, fill_price, sig["target"], sig["stop_loss"])
+            new_result = {"filled": True, "outcome": outcome, "return_pct": ret_pct, "days_held": days}
+        else:
+            new_result = {"filled": False, "outcome": "no_fill", "return_pct": None, "days_held": None}
+
+        # OLD method — always chases the live price immediately
+        old_target, old_stop = old_target_stop(live["ltp"], baseline["atr_14"], sig["score"])
+        old_outcome, old_ret, old_days = _simulate_forward(df, t, live["ltp"], old_target, old_stop)
+
+        results.append({
+            "symbol": symbol, "date": str(df.index[t].date()), "score": sig["score"],
+            "extended": sig["extended"], "levels_basis": sig["levels_basis"],
+            "new_entry": sig["entry"], "new_target": sig["target"], "new_stop": sig["stop_loss"],
+            "new_filled": new_result["filled"], "new_outcome": new_result["outcome"],
+            "new_return_pct": new_result["return_pct"], "new_days_held": new_result["days_held"],
+            "old_entry": live["ltp"], "old_target": old_target, "old_stop": old_stop,
+            "old_outcome": old_outcome, "old_return_pct": old_ret, "old_days_held": old_days,
+        })
+
     return results
 
 
-def resolve_outcome(df, signal_idx, result):
-    entry, target, stop = result["entry"], result["target"], result["stop_loss"]
-    is_pullback = result["entry_note"] != "current market price"
-    n = len(df)
-
-    fill_idx = signal_idx
-    if is_pullback:
-        fill_idx = None
-        for j in range(signal_idx, min(signal_idx + ENTRY_FILL_WINDOW_DAYS, n)):
-            if df.iloc[j]["low"] <= entry:
-                fill_idx = j
-                break
-        if fill_idx is None:
-            return "not_filled", None
-
-    for j in range(fill_idx, min(fill_idx + FORWARD_WINDOW_DAYS, n)):
-        row = df.iloc[j]
-        hit_target = row["high"] >= target
-        hit_stop = row["low"] <= stop
-        if hit_target and hit_stop:
-            return "ambiguous_same_day", j - fill_idx
-        if hit_target:
-            return "win", j - fill_idx
-        if hit_stop:
-            return "loss", j - fill_idx
-    return "open_at_window_end", FORWARD_WINDOW_DAYS
+def summarize(results, label, key_prefix):
+    filled = [r for r in results if r.get(f"{key_prefix}_return_pct") is not None]
+    print(f"\n{label}")
+    if not filled:
+        print("  No filled signals.")
+        return
+    returns = [r[f"{key_prefix}_return_pct"] for r in filled]
+    wins = sum(1 for r in filled if r[f"{key_prefix}_outcome"] == "target")
+    losses = sum(1 for r in filled if r[f"{key_prefix}_outcome"] == "stop")
+    timeouts = sum(1 for r in filled if r[f"{key_prefix}_outcome"] == "timeout")
+    print(f"  Signals filled: {len(filled)} / {len(results)}")
+    print(f"  Target hit: {wins} ({wins/len(filled)*100:.0f}%)  |  "
+          f"Stopped out: {losses} ({losses/len(filled)*100:.0f}%)  |  "
+          f"Timed out: {timeouts} ({timeouts/len(filled)*100:.0f}%)")
+    print(f"  Avg return: {statistics.mean(returns):+.2f}%  |  Median: {statistics.median(returns):+.2f}%  |  "
+          f"Best: {max(returns):+.2f}%  |  Worst: {min(returns):+.2f}%")
+    compounded = 1.0
+    for r in returns:
+        compounded *= (1 + r / 100)
+    print(f"  Equal-sized-bet cumulative multiple across all signals (no compounding logic beyond this): {compounded:.2f}x")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--months", type=int, default=6, help="how many months back to test")
-    parser.add_argument("--min-score", type=int, default=None,
-                         help="override MIN_SIGNAL_SCORE for this run (default: use config.py)")
+    parser.add_argument("--months", type=int, default=6)
+    parser.add_argument("--symbols", type=str, default=None, help="comma-separated subset; default = full universe")
+    parser.add_argument("--out", type=str, default="backtest_report.json")
     args = parser.parse_args()
 
-    if args.min_score is not None:
-        config.MIN_SIGNAL_SCORE = args.min_score
+    universe = args.symbols.split(",") if args.symbols else data_fetcher.load_universe()
+    print(f"Backtesting {len(universe)} symbols over the last {args.months} months "
+          f"(equity signals only — F&O/OI checks need futures history this backtest doesn't fetch)...")
 
-    universe = data_fetcher.load_universe()
-    all_hist = download_full_history(universe, config.LONG_HISTORY_YEARS)
-    print(f"Got history for {len(all_hist)}/{len(universe)} symbols\n")
+    to_date = datetime.now()
+    from_date = to_date - timedelta(days=int(config.LONG_HISTORY_YEARS * 365.25))
+    tickers = [f"{s}.NS" for s in universe]
+    raw = yf.download(tickers=tickers, start=from_date.strftime("%Y-%m-%d"), end=to_date.strftime("%Y-%m-%d"),
+                       group_by="ticker", progress=True, auto_adjust=False, threads=True)
 
-    all_signals = []
-    for symbol, df in all_hist.items():
-        if len(df) < MIN_HISTORY_ROWS:
+    all_results = []
+    for symbol in universe:
+        ticker = f"{symbol}.NS"
+        try:
+            hist = raw[ticker].dropna(how="all") if isinstance(raw.columns, pd.MultiIndex) else raw.dropna(how="all")
+        except Exception:
             continue
-        backtest_days = int(args.months * 21)  # ~21 trading days/month
-        start_idx = max(MIN_HISTORY_ROWS, len(df) - backtest_days)
-        sigs = simulate_symbol(symbol, df, start_idx)
-        for r in sigs:
-            outcome, days = resolve_outcome(df, r["_signal_idx"], r)
-            r["_outcome"] = outcome
-            r["_days_to_outcome"] = days
-        all_signals.extend(sigs)
+        if hist is None or hist.empty:
+            continue
+        try:
+            all_results.extend(backtest_symbol(symbol, hist, args.months))
+        except Exception as e:
+            print(f"  {symbol}: backtest error — {e}")
 
-    total = len(all_signals)
-    favorable = [r for r in all_signals if r["favorable"]]
+    print(f"\nTotal signals fired: {len(all_results)}")
+    summarize(all_results, "OLD method (flat ATR multiplier, always chase LTP)", "old")
+    summarize(all_results, "NEW method (extension-aware entry, pattern/ATR-based target-stop)", "new")
 
-    print(f"=== Backtest: last {args.months} months, {len(all_hist)} symbols (equities only) ===")
-    print(f"Total signals (score >= {config.MIN_SIGNAL_SCORE}): {total}")
-    print(f"Favorable / would-be-emailed (R:R >= {config.MIN_RISK_REWARD_TO_ALERT}): {len(favorable)}")
+    extended = [r for r in all_results if r["extended"]]
+    print(f"\n{len(extended)} of {len(all_results)} signals were flagged 'extended' "
+          f"(pullback entry proposed instead of chasing).")
+    if extended:
+        fill_rate = sum(1 for r in extended if r["new_filled"]) / len(extended) * 100
+        print(f"  Of those, {fill_rate:.0f}% actually got filled at the proposed pullback level within {FILL_WINDOW_DAYS} trading days.")
 
-    if favorable:
-        per_month = len(favorable) / args.months
-        print(f"  -> approx {per_month:.1f} emailed equity signals/month across the whole universe\n")
-
-        outcomes = pd.Series([r["_outcome"] for r in favorable]).value_counts()
-        print("Outcome breakdown (of favorable/emailed signals):")
-        print(outcomes.to_string())
-
-        wins = sum(1 for r in favorable if r["_outcome"] == "win")
-        losses = sum(1 for r in favorable if r["_outcome"] == "loss")
-        decided = wins + losses
-        if decided:
-            print(f"\nWin rate (target hit before stop, excl. not-yet-decided/ambiguous): "
-                  f"{wins}/{decided} = {wins/decided*100:.0f}%")
-    else:
-        print("No favorable signals in this window — try --months 12, or --min-score 2 to loosen the screen.")
-
-    if all_signals:
-        detail = pd.DataFrame([{
-            "date": r["_signal_date"], "symbol": r["symbol"], "score": r["score"],
-            "favorable": r["favorable"], "entry": r["entry"], "entry_note": r["entry_note"],
-            "target": r["target"], "target_basis": r["target_basis"],
-            "stop_loss": r["stop_loss"], "stop_basis": r["stop_basis"],
-            "risk_reward": r["risk_reward"], "outcome": r.get("_outcome"),
-            "days_to_outcome": r.get("_days_to_outcome"),
-        } for r in all_signals])
-        detail.to_csv("backtest_results.csv", index=False)
-        print(f"\nFull detail written to backtest_results.csv ({len(detail)} rows)")
+    with open(args.out, "w") as f:
+        json.dump(all_results, f, indent=2, default=str)
+    print(f"\nFull per-signal detail written to {args.out}")
 
 
 if __name__ == "__main__":

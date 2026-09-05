@@ -9,28 +9,35 @@ log = logging.getLogger("nse_scanner.notifier")
 
 DISCLAIMER = (
     "This is an automated technical screener, not investment advice. Entry/target/"
-    "stop-loss below are formula- and history-derived heuristic levels, not a "
-    "personalized recommendation — they don't predict returns, and past patterns "
-    "don't guarantee future moves. Verify independently, size your position "
-    "appropriately, and manage your own risk before acting. Only setups clearing "
-    "a minimum risk:reward bar are emailed at all — weaker setups are logged, not sent."
+    "stop-loss below are derived heuristically — either from this stock's own "
+    "historical pattern of similar past setups (where enough precedent exists) or "
+    "from volatility (ATR) and signal strength otherwise — not a personalized "
+    "recommendation. Past patterns don't guarantee future moves. Verify "
+    "independently, size your position appropriately, and manage your own risk "
+    "before acting."
 )
 
 
 def _format_email(alerts):
     lines = [f"NSE Scanner — {len(alerts)} signal(s) found\n"]
     for a in alerts:
+        flag = "  ⚠ EXTENDED" if a.get("extended") else ""
         lines.append(
             f"• {a['symbol']} ({a['instrument']})  ₹{a['close']}  "
-            f"({a['pct_change']:+.2f}% today)  score {a['score']}/{a['max_score']}"
+            f"({a['pct_change']:+.2f}% today)  score {a['score']}/{a['max_score']}{flag}"
         )
         for r in a["reasons"]:
             lines.append(f"    - {r}")
         if a.get("entry") is not None:
-            rr = f"  |  R:R {a['risk_reward']}" if a.get("risk_reward") is not None else ""
-            lines.append(f"    Entry ₹{a['entry']} ({a.get('entry_note', '')})")
-            lines.append(f"    Target ₹{a['target']} ({a.get('target_basis', '')})")
-            lines.append(f"    Stop-loss ₹{a['stop_loss']} ({a.get('stop_basis', '')}){rr}")
+            rr = f", R:R {a['risk_reward']}" if a.get("risk_reward") is not None else ""
+            lines.append(
+                f"    Entry ₹{a['entry']}  |  Target ₹{a['target']}  |  "
+                f"Stop-loss ₹{a['stop_loss']}{rr}"
+            )
+            if a.get("entry_note"):
+                lines.append(f"    Entry note: {a['entry_note']}")
+            if a.get("levels_basis"):
+                lines.append(f"    Target/stop basis: {a['levels_basis']}")
         lines.append("")
     lines.append("-" * 60)
     lines.append(DISCLAIMER)

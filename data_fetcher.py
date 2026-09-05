@@ -18,9 +18,11 @@ for each check.
 import json
 import logging
 import os
+import statistics
 import time
 from datetime import datetime, timedelta
 
+import numpy as np
 import pandas as pd
 import pytz
 import yfinance as yf
@@ -219,6 +221,33 @@ def _save_yf_cache(data):
         json.dump({"date": _today_ist_str(), "data": data}, f, indent=2)
 
 
+def _rsi_series(close, period):
+    """Wilder-style RSI (simple rolling-mean variant), as a pandas Series
+    aligned to `close`'s index. Shared by the daily baseline calc and the
+    long-history backtest so both use an identical definition of RSI."""
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    return 100 - (100 / (1 + rs))
+
+
+def _atr_series(df, period):
+    """Average True Range as a pandas Series. `df` needs high/low/close
+    columns (lowercase). Shared by the daily baseline calc (ATR-14) and the
+    long-history stats (ATR-252, a much less noisy read on a stock's
+    "normal" volatility than a 14-day window taken mid-breakout)."""
+    prior_close = df["close"].shift(1)
+    true_range = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prior_close).abs(),
+        (df["low"] - prior_close).abs(),
+    ], axis=1).max(axis=1)
+    return true_range.rolling(period).mean()
+
+
 def _compute_baseline_stats(hist):
     """hist: a yfinance daily OHLCV DataFrame, most recent row = last
     COMPLETED trading day (today is never in this data)."""
@@ -233,45 +262,15 @@ def _compute_baseline_stats(hist):
     turnover = (df["close"] * df["volume"]) / 1e7  # INR crore
     avg_turnover_cr_20d = turnover.rolling(20).mean().iloc[-1]
 
-    delta = df["close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(config.RSI_PERIOD).mean()
-    avg_loss = loss.rolling(config.RSI_PERIOD).mean()
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
-    rsi_series = 100 - (100 / (1 + rs))
+    rsi_series = _rsi_series(df["close"], config.RSI_PERIOD)
     rsi_14 = rsi_series.iloc[-1]
     prev_rsi_14 = rsi_series.iloc[-2] if len(rsi_series) > 1 else None
 
     prev_close = df["close"].iloc[-1]
 
     # ATR-14: average true range, used for volatility-scaled target/stop-loss
-    prior_close = df["close"].shift(1)
-    true_range = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - prior_close).abs(),
-        (df["low"] - prior_close).abs(),
-    ], axis=1).max(axis=1)
-    atr_series = true_range.rolling(config.ATR_PERIOD).mean()
+    atr_series = _atr_series(df, config.ATR_PERIOD)
     atr_14 = atr_series.iloc[-1]
-
-    # --- Entry-quality context: is the stock already extended? ---
-    sma_50 = df["close"].rolling(50).mean().iloc[-1] if len(df) >= 50 else None
-    ema_20 = df["close"].ewm(span=config.PULLBACK_EMA_PERIOD, adjust=False).mean().iloc[-1]
-
-    # --- Stop-loss support: actual recent swing low, not just a formula ---
-    swing_low_lookback = min(config.SWING_LOW_LOOKBACK_DAYS, len(df))
-    swing_low = df["low"].iloc[-swing_low_lookback:].min()
-
-    # --- Target resistance candidates from real history, nearest above price wins ---
-    def _period_high(trading_days):
-        window = df["high"].iloc[-trading_days:] if len(df) >= 1 else df["high"]
-        return float(window.max()) if len(window) else None
-
-    high_52w = _period_high(252)
-    high_3y = _period_high(756)
-    high_5y = _period_high(1260)
-    all_time_high = float(df["high"].max())
 
     for val in (avg_volume_20d, high_20d, avg_turnover_cr_20d, rsi_14, prev_close):
         if pd.isna(val):
@@ -285,27 +284,246 @@ def _compute_baseline_stats(hist):
         "prev_rsi_14": float(prev_rsi_14) if prev_rsi_14 is not None and not pd.isna(prev_rsi_14) else None,
         "prev_close": float(prev_close),
         "atr_14": float(atr_14) if not pd.isna(atr_14) else None,
-        "sma_50": float(sma_50) if sma_50 is not None and not pd.isna(sma_50) else None,
-        "ema_20": float(ema_20) if not pd.isna(ema_20) else None,
-        "swing_low": float(swing_low) if not pd.isna(swing_low) else None,
-        "high_52w": high_52w,
-        "high_3y": high_3y,
-        "high_5y": high_5y,
-        "all_time_high": all_time_high,
     }
 
 
-def fetch_yf_baseline_batch(symbols, lookback_days=None):
+# ---------------------------------------------------------------------------
+# Long-term (up to config.LONG_HISTORY_YEARS) historical stats: pivot
+# support/resistance levels, a long-window ATR, and a per-symbol mini
+# backtest of "what happened after past setups like today's" — used by
+# screener.py to ground entry/target/stop-loss in this specific stock's own
+# history rather than a generic multiplier. Refreshed weekly (see
+# LONG_TERM_CACHE_FILE below), not daily — a decade-plus of history and its
+# derived stats don't meaningfully change day to day, and re-downloading it
+# daily for the whole universe would be a needless load on Yahoo.
+# ---------------------------------------------------------------------------
+LONG_TERM_CACHE_FILE = os.path.join(os.path.dirname(__file__), "data", "long_term_cache.json")
+
+
+def _load_long_term_cache():
+    if not os.path.exists(LONG_TERM_CACHE_FILE):
+        return {}
+    try:
+        with open(LONG_TERM_CACHE_FILE) as f:
+            cache = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    cached_date = cache.get("date")
+    if not cached_date:
+        return {}
+    try:
+        age_days = (datetime.now(_IST).date() - datetime.fromisoformat(cached_date).date()).days
+    except ValueError:
+        return {}
+    if age_days >= config.LONG_TERM_CACHE_REFRESH_DAYS:
+        return {}
+    return cache.get("data", {})
+
+
+def _save_long_term_cache(data):
+    os.makedirs(os.path.dirname(LONG_TERM_CACHE_FILE), exist_ok=True)
+    with open(LONG_TERM_CACHE_FILE, "w") as f:
+        json.dump({"date": _today_ist_str(), "data": data}, f, indent=2)
+
+
+def _cluster_levels(levels, cluster_pct):
+    """Collapse a list of raw pivot price levels into representative zones —
+    e.g. five separate pivot highs within 2% of each other become one
+    resistance level — so nearby-level lookups aren't misled by noise."""
+    if not levels:
+        return []
+    levels = sorted(levels)
+    clusters = [[levels[0]]]
+    for lv in levels[1:]:
+        if (lv - clusters[-1][-1]) / clusters[-1][-1] * 100 <= cluster_pct:
+            clusters[-1].append(lv)
+        else:
+            clusters.append([lv])
+    return [sum(c) / len(c) for c in clusters]
+
+
+def _detect_pivots(df, window):
+    """A bar is a pivot high/low if its high/low is the max/min within a
+    +/- `window` trading-day span around it. Simple, well-established swing-
+    point definition; deliberately not fancier than that."""
+    span = window * 2 + 1
+    if len(df) < span:
+        return [], []
+    is_pivot_high = df["high"] == df["high"].rolling(span, center=True).max()
+    is_pivot_low = df["low"] == df["low"].rolling(span, center=True).min()
+    resistances = df.loc[is_pivot_high.fillna(False), "high"].tolist()
+    supports = df.loc[is_pivot_low.fillna(False), "low"].tolist()
+    return resistances, supports
+
+
+def _breakout_backtest_stats(df):
+    """The core "learn from this stock's own past" piece: walk its full
+    history and find every past day that met the SAME two objective checks
+    used in today's live signal (N-day breakout + RSI momentum — see
+    screener.py checks 3 & 4), then measure what actually happened over the
+    following BREAKOUT_BACKTEST_FORWARD_DAYS trading days. Returns the
+    median forward return and median forward drawdown across all such
+    occurrences, plus the sample size so callers can judge how much to
+    trust it (see BREAKOUT_BACKTEST_MIN_SAMPLES)."""
+    close = df["close"]
+    # shift(1): "N-day high" must be computed from days STRICTLY BEFORE the
+    # setup day, exactly mirroring how the live scanner compares today's LTP
+    # against yesterday's high_20d baseline (never including today itself).
+    high_n = close.rolling(config.BREAKOUT_LOOKBACK_DAYS).max().shift(1)
+    rsi = _rsi_series(close, config.RSI_PERIOD)
+    is_setup = (close > high_n) & (rsi >= config.RSI_MOMENTUM_MIN)
+
+    n = len(df)
+    horizon = config.BREAKOUT_BACKTEST_FORWARD_DAYS
+    fwd_returns, fwd_drawdowns = [], []
+    setup_positions = np.flatnonzero(is_setup.fillna(False).to_numpy())
+    for i in setup_positions:
+        if i + horizon >= n:
+            continue
+        entry_px = close.iloc[i]
+        if not entry_px or pd.isna(entry_px):
+            continue
+        fwd_close = close.iloc[i + horizon]
+        window_low = df["low"].iloc[i + 1: i + horizon + 1].min()
+        fwd_returns.append((fwd_close / entry_px - 1) * 100)
+        fwd_drawdowns.append((window_low / entry_px - 1) * 100)
+
+    sample_size = len(fwd_returns)
+    if sample_size < config.BREAKOUT_BACKTEST_MIN_SAMPLES:
+        return {"sample_size": sample_size, "target_return_pct": None,
+                "median_drawdown_pct": None, "winners_mae_pct": None}
+
+    # For the STOP: use the max-adverse-excursion of setups that actually
+    # went on to be profitable by the horizon's end, not a figure blended
+    # with eventual losers. Sizing the stop off the whole population's
+    # median drawdown means it reflects how far LOSERS typically fell before
+    # being abandoned — which has little to do with how much room a genuine
+    # winner needs, and backtesting confirmed it produced oversized losses.
+    winners_mae = [dd for ret, dd in zip(fwd_returns, fwd_drawdowns) if ret > 0]
+    winners_mae_pct = float(np.median(winners_mae)) if len(winners_mae) >= max(config.BREAKOUT_BACKTEST_MIN_SAMPLES // 2, 4) else None
+
+    return {
+        "sample_size": sample_size,
+        # For the TARGET: a high percentile (see BREAKOUT_TARGET_PERCENTILE),
+        # not the median — this stock's real, achieved-by-a-meaningful-
+        # minority-of-past-setups upside, not just its "typical" outcome.
+        "target_return_pct": float(np.percentile(fwd_returns, config.BREAKOUT_TARGET_PERCENTILE)),
+        "median_drawdown_pct": float(statistics.median(fwd_drawdowns)),
+        "winners_mae_pct": winners_mae_pct,
+    }
+
+
+def _compute_long_term_stats(hist):
+    df = hist.copy()
+    df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+    df = df.rename(columns=str.lower).sort_index()
+    df = df.dropna(subset=["high", "low", "close"])
+    if len(df) < 60:
+        return None  # too little history for any of this to mean anything
+
+    all_time_high = float(df["high"].max())
+    last_252 = df.tail(252)
+    high_52w = float(last_252["high"].max()) if not last_252.empty else None
+
+    atr_series = _atr_series(df, config.LONG_TERM_ATR_PERIOD)
+    atr_252 = float(atr_series.iloc[-1]) if not atr_series.empty and not pd.isna(atr_series.iloc[-1]) else None
+
+    raw_res, raw_sup = _detect_pivots(df, config.PIVOT_WINDOW_DAYS)
+    resistances = _cluster_levels(raw_res, config.PIVOT_CLUSTER_PCT)
+    supports = _cluster_levels(raw_sup, config.PIVOT_CLUSTER_PCT)
+
+    backtest = _breakout_backtest_stats(df)
+
+    return {
+        "all_time_high": all_time_high,
+        "high_52w": high_52w,
+        "atr_252": atr_252,
+        "resistances": resistances,
+        "supports": supports,
+        "breakout_sample_size": backtest["sample_size"],
+        "breakout_target_return_pct": backtest["target_return_pct"],
+        "breakout_median_drawdown_pct": backtest["median_drawdown_pct"],
+        "breakout_winners_mae_pct": backtest["winners_mae_pct"],
+        "history_years": round(len(df) / 252, 1),
+    }
+
+
+def fetch_long_term_stats_batch(symbols, years=None):
+    """Returns {symbol: long_term_stats_dict}. Weekly-cached — see module
+    docstring above."""
+    years = years or config.LONG_HISTORY_YEARS
+    cache = _load_long_term_cache()
+    if cache:
+        log.info("Using cached long-term stats (%d symbols, refreshed within the last %d days)",
+                  len(cache), config.LONG_TERM_CACHE_REFRESH_DAYS)
+        return cache
+
+    to_date = datetime.now()
+    from_date = to_date - timedelta(days=int(years * 365.25))
+    tickers = [f"{s}.NS" for s in symbols]
+
+    raw = None
+    for attempt in range(1, config.YF_BATCH_RETRY_ATTEMPTS + 1):
+        log.info("Fetching %s years of history for %d symbols (attempt %d/%d)",
+                  years, len(symbols), attempt, config.YF_BATCH_RETRY_ATTEMPTS)
+        try:
+            raw = yf.download(
+                tickers=tickers,
+                start=from_date.strftime("%Y-%m-%d"),
+                end=to_date.strftime("%Y-%m-%d"),
+                group_by="ticker",
+                progress=False,
+                auto_adjust=False,
+                threads=True,
+            )
+            if raw is not None and not raw.empty:
+                break
+        except Exception:
+            log.exception("Batched long-history yfinance download failed (attempt %d)", attempt)
+        if attempt < config.YF_BATCH_RETRY_ATTEMPTS:
+            time.sleep(config.YF_BATCH_RETRY_BACKOFF_SEC * attempt)
+
+    stats = {}
+    if raw is not None and not raw.empty:
+        for symbol in symbols:
+            ticker = f"{symbol}.NS"
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    if ticker not in raw.columns.get_level_values(0):
+                        continue
+                    hist = raw[ticker].dropna(how="all")
+                else:
+                    hist = raw.dropna(how="all")
+            except Exception:
+                continue
+            if hist is None or hist.empty:
+                continue
+            try:
+                s = _compute_long_term_stats(hist)
+            except Exception:
+                log.exception("Failed computing long-term stats for %s", symbol)
+                continue
+            if s:
+                stats[symbol] = s
+
+    coverage_pct = (len(stats) / len(symbols) * 100) if symbols else 0
+    log.info("Long-term stats computed for %d/%d symbols (%.0f%% coverage)",
+              len(stats), len(symbols), coverage_pct)
+
+    if coverage_pct >= config.YF_MIN_COVERAGE_PCT:
+        _save_long_term_cache(stats)
+    else:
+        log.warning("Long-term stats coverage below %.0f%% — not caching, will retry next scan cycle",
+                     config.YF_MIN_COVERAGE_PCT)
+
+    return stats
+
+
+def fetch_yf_baseline_batch(symbols, lookback_days=90):
     """
     Returns {symbol: baseline_stats_dict}, cached to disk for the calendar
     day (IST) so Yahoo Finance is only hit once per day regardless of how
     many times the scanner runs.
-
-    Pulls up to config.LONG_HISTORY_YEARS of daily history (default 15y) —
-    needed for the 52-week/3y/5y/all-time-high resistance levels used in
-    target/entry logic, not just the ~90 days the short-term indicators need.
-    Recently-listed stocks simply get whatever shorter history exists;
-    yfinance returns what's available rather than erroring.
 
     Downloads all symbols in a single batched yfinance call (with retries)
     rather than ~100+ sequential single-symbol requests — Yahoo Finance
@@ -321,7 +539,6 @@ def fetch_yf_baseline_batch(symbols, lookback_days=None):
         log.info("Using cached Yahoo Finance baseline (%d symbols) for %s", len(cache), _today_ist_str())
         return cache
 
-    lookback_days = lookback_days or (config.LONG_HISTORY_YEARS * 365)
     to_date = datetime.now()
     from_date = to_date - timedelta(days=lookback_days)
     tickers = [f"{s}.NS" for s in symbols]
