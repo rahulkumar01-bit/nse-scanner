@@ -257,10 +257,21 @@ def main():
     # (Without this, once that config value is set to e.g. 2.0, evaluate()
     # would only ever return R:R>=2.0 signals here, collapsing the very
     # comparison this diagnostic exists to make.)
+    # Same reasoning as the R:R override: MIN_SIGNAL_SCORE gates evaluate()'s
+    # return the same way (score < MIN_SIGNAL_SCORE -> None), so without this
+    # override summarize_by_score() could only ever see whatever score level
+    # is currently live -- making it blind to exactly the comparison it
+    # exists to make (e.g. "would score=3 have done better than score=4?").
     original_min_rr = config.MIN_RISK_REWARD_TO_ALERT
+    original_min_score = config.MIN_SIGNAL_SCORE
     config.MIN_RISK_REWARD_TO_ALERT = None
-    print(f"(Note: backtesting with MIN_RISK_REWARD_TO_ALERT temporarily disabled — live config has it set to "
-          f"{original_min_rr!r} — see the R:R breakdown below to judge what that setting should actually be.)\n")
+    config.MIN_SIGNAL_SCORE = 1
+    print(f"(Note: backtesting with MIN_RISK_REWARD_TO_ALERT and MIN_SIGNAL_SCORE temporarily disabled/lowered — "
+          f"live config has them at {original_min_rr!r} and {original_min_score!r} respectively — "
+          f"see the score and R:R breakdowns below to judge what those settings should actually be. Minor caveat: "
+          f"lowering MIN_SIGNAL_SCORE also slightly inflates the ATR-fallback branch's target sizing bonus, since "
+          f"that branch scales off score-vs-MIN_SIGNAL_SCORE — negligible in practice since most signals use the "
+          f"pattern-based branch, not the ATR fallback.)\n")
 
     universe = args.symbols.split(",") if args.symbols else data_fetcher.load_universe()
     print(f"Backtesting {len(universe)} symbols over the last {args.months} months "
@@ -305,6 +316,7 @@ def main():
         print(f"  Of those, {fill_rate:.0f}% actually got filled at the proposed pullback level within {FILL_WINDOW_DAYS} trading days.")
 
     config.MIN_RISK_REWARD_TO_ALERT = original_min_rr  # restore, in case this module is ever imported rather than run standalone
+    config.MIN_SIGNAL_SCORE = original_min_score
 
     with open(args.out, "w") as f:
         json.dump(all_results, f, indent=2, default=str)
