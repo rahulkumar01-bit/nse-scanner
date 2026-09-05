@@ -261,6 +261,34 @@ def summarize_by_sample_size(results, breakpoints=(8, 15, 30)):
             summarize(subset, label, "new")
 
 
+def summarize_grid(results):
+    """Compact grid over plausible (min_score, min_rr) combinations, plus an
+    exact-score-3 variant (since score=4 underperformed score=3 in
+    isolation — worth checking whether pooling it into a >=3 filter is
+    actually diluting the best-performing cell). One line per combo, so
+    many cells fit without the full verbose summarize() output each."""
+    combos = [
+        ("score>=3, rr>=1.0", lambda r: r["score"] >= 3 and (r["new_risk_reward"] or 0) >= 1.0),
+        ("score>=3, rr>=1.5", lambda r: r["score"] >= 3 and (r["new_risk_reward"] or 0) >= 1.5),
+        ("score>=3, rr>=2.0", lambda r: r["score"] >= 3 and (r["new_risk_reward"] or 0) >= 2.0),
+        ("score==3, rr>=1.5", lambda r: r["score"] == 3 and (r["new_risk_reward"] or 0) >= 1.5),
+        ("score==3, rr>=2.0", lambda r: r["score"] == 3 and (r["new_risk_reward"] or 0) >= 2.0),
+        ("score>=4, rr>=1.5", lambda r: r["score"] >= 4 and (r["new_risk_reward"] or 0) >= 1.5),
+    ]
+    print(f"\n{'Combo':<20}{'n':>6}{'filled':>8}{'target%':>9}{'stop%':>8}{'avg%':>8}{'median%':>9}{'worst%':>8}")
+    for label, cond in combos:
+        subset = [r for r in results if cond(r)]
+        filled = [r for r in subset if r.get("new_return_pct") is not None]
+        if not filled:
+            print(f"{label:<20}{len(subset):>6}{0:>8}   (no filled signals)")
+            continue
+        returns = [r["new_return_pct"] for r in filled]
+        wins = sum(1 for r in filled if r["new_outcome"] == "target")
+        losses = sum(1 for r in filled if r["new_outcome"] == "stop")
+        print(f"{label:<20}{len(subset):>6}{len(filled):>8}{wins/len(filled)*100:>8.0f}%{losses/len(filled)*100:>7.0f}%"
+              f"{statistics.mean(returns):>+7.2f}%{statistics.median(returns):>+8.2f}%{min(returns):>+7.2f}%")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--months", type=int, default=6)
@@ -325,6 +353,7 @@ def main():
     summarize_by_sample_size(all_results)
     summarize_risk_reward(all_results)
     summarize_combined_filter(all_results, original_min_score, original_min_rr or 0)
+    summarize_grid(all_results)
 
     extended = [r for r in all_results if r["extended"]]
     print(f"\n{len(extended)} of {len(all_results)} signals were flagged 'extended' "
