@@ -8,18 +8,7 @@ trade. Position sizing, stop-losses, and your own judgement are on you.
 
 Each candidate is scored 0-5 on independent checks, combining yesterday's
 baseline stats (from Yahoo Finance) with today's live snapshot (from
-Kotak). A symbol clearing config.MIN_SIGNAL_SCORE then gets a full
-entry/target/stop-loss workup:
-  - Entry: current price, unless the stock looks extended (RSI/distance from
-    its 50-day average), in which case a pullback level is proposed instead.
-  - Stop-loss: the actual recent swing low (real support), capped so it's
-    never unreasonably wide.
-  - Target: the nearest real prior resistance level (52-week/3y/5y/all-time
-    high) that clears your minimum expectation, or a volatility+strength
-    projection if no such level exists.
-A result is only "favorable" (and gets emailed) if the resulting
-risk:reward clears config.MIN_RISK_REWARD_TO_ALERT — otherwise it's
-computed and logged, but no email is sent.
+Kotak). A symbol is alerted when the score reaches config.MIN_SIGNAL_SCORE.
 """
 from datetime import datetime
 
@@ -30,7 +19,113 @@ import config
 _IST = pytz.timezone(config.TIMEZONE)
 
 
-def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None):
+def _nearest_above(levels, price, max_pct):
+    candidates = [lv for lv in (levels or []) if lv > price and (lv - price) / price * 100 <= max_pct]
+    return min(candidates) if candidates else None
+
+
+def _nearest_below(levels, price, max_pct):
+    candidates = [lv for lv in (levels or []) if lv < price and (price - lv) / price * 100 <= max_pct]
+    return max(candidates) if candidates else None
+
+
+def _is_extended(pct_change, rsi, ltp, high_20d):
+    """Heuristic check for "this runup already looks late-stage" — any one
+    of an already-very-overbought RSI, an unusually large single-day spike,
+    or price already running well past the breakout trigger (not just
+    freshly through it) is treated as a caution sign."""
+    if rsi is not None and rsi >= config.RSI_EXTENDED_THRESHOLD:
+        return True
+    if pct_change >= config.EXTENDED_DAY_MOVE_PCT:
+        return True
+    if high_20d and ltp > high_20d * (1 + config.EXTENDED_ABOVE_BREAKOUT_PCT / 100):
+        return True
+    return False
+
+
+def _propose_entry(ltp, atr, high_20d, supports, extended):
+    """Returns (entry_price, note). When the move doesn't look extended,
+    entry is simply the live price — chasing isn't really "chasing" yet.
+    When it does, prefer a real historical support/pivot level as a
+    pullback entry over the live price; fall back to the breakout trigger
+    level, then a plain ATR-sized pullback, in that order of preference."""
+    if not extended:
+        return ltp, "current price — the move doesn't look extended yet"
+
+    support = _nearest_below(supports, ltp, config.SUPPORT_SEARCH_MAX_PCT_BELOW)
+    if support:
+        return support, (
+            f"pullback entry near a historical support/pivot level (\u20b9{support:.2f}) "
+            "rather than chasing here — the move already looks extended"
+        )
+    if high_20d and high_20d < ltp:
+        return high_20d, (
+            f"pullback entry near the recent breakout trigger level (\u20b9{high_20d:.2f}), "
+            "which should now act as support — the move already looks extended"
+        )
+    if atr:
+        px = ltp - config.PULLBACK_ATR_MULTIPLIER * atr
+        return px, (
+            f"pullback entry ~{config.PULLBACK_ATR_MULTIPLIER:g}x ATR below the current price "
+            "(no clean historical support level found nearby) — the move already looks extended"
+        )
+    return ltp, "the move already looks extended, but no pullback reference was available — treat the current price with extra caution"
+
+
+def _propose_target_stop(entry, atr, long_term, score, min_signal_score):
+    """Prefer this stock's OWN historical behaviour (from a per-symbol
+    backtest of similar past setups) when there's enough precedent to trust
+    it; otherwise fall back to the ATR-multiplier method. Either way, the
+    result is then sanity-checked against real historical resistance
+    (caps an overreaching target) and support (can tighten the stop to a
+    cleaner structural invalidation point)."""
+    long_term = long_term or {}
+    resistances = long_term.get("resistances") or []
+    supports = long_term.get("supports") or []
+    sample_size = long_term.get("breakout_sample_size") or 0
+    median_return_pct = long_term.get("breakout_median_return_pct")
+    median_drawdown_pct = long_term.get("breakout_median_drawdown_pct")
+    long_atr = long_term.get("atr_252") or atr  # prefer the steadier 1-year ATR for bounding the stop; fall back to ATR-14
+
+    min_dist = config.STOP_LOSS_MIN_ATR_MULTIPLIER * long_atr if long_atr else None
+    max_dist = config.STOP_LOSS_MAX_ATR_MULTIPLIER * long_atr if long_atr else None
+
+    if sample_size >= config.BREAKOUT_BACKTEST_MIN_SAMPLES and median_return_pct is not None:
+        target = entry * (1 + max(median_return_pct, config.TARGET_RETURN_MIN_PCT) / 100)
+        if min_dist is not None:
+            drawdown_dist = abs(median_drawdown_pct) / 100 * entry if median_drawdown_pct is not None else min_dist
+            stop_dist = min(max(drawdown_dist, min_dist), max_dist)
+        else:
+            stop_dist = entry * config.STOP_LOSS_PCT_FALLBACK / 100
+        stop_loss = entry - stop_dist
+        basis = f"this stock's own history — {sample_size} similar past setups"
+    elif atr:
+        atr_multiplier = config.TARGET_ATR_BASE_MULTIPLIER + \
+            max(0, score - min_signal_score) * config.TARGET_ATR_SCORE_STEP
+        target = max(entry + atr_multiplier * atr, entry * (1 + config.TARGET_RETURN_MIN_PCT / 100))
+        stop_loss = entry - config.STOP_LOSS_ATR_MULTIPLIER * atr
+        basis = "ATR-based (not enough matching historical setups yet for a pattern-based estimate)"
+    else:
+        target = entry * (1 + config.TARGET_RETURN_MIN_PCT / 100)
+        stop_loss = entry * (1 - config.STOP_LOSS_PCT_FALLBACK / 100)
+        basis = "fallback percentage (no price history available)"
+
+    resistance = _nearest_above(resistances, entry, config.RESISTANCE_SEARCH_MAX_PCT_ABOVE)
+    if resistance and entry < resistance < target:
+        target = resistance
+        basis += "; target capped at a nearby historical resistance level"
+
+    support = _nearest_below(supports, entry, config.SUPPORT_SEARCH_MAX_PCT_BELOW)
+    if support and min_dist is not None:
+        structural_dist = entry - support * (1 - config.SUPPORT_BUFFER_PCT / 100)
+        if min_dist <= structural_dist <= max_dist:
+            stop_loss = entry - structural_dist
+            basis += "; stop placed just below a nearby support level"
+
+    return target, stop_loss, basis
+
+
+def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_term=None):
     """
     baseline: dict from data_fetcher._compute_baseline_stats() (yesterday
       and earlier — avg_volume_20d, high_20d, rsi_14, prev_rsi_14,
@@ -102,79 +197,17 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None):
     if checks["oi_buildup"]:
         reasons.append(f"open interest up {oi_change_pct:.1f}% (long buildup)")
 
-    # --- Entry: is the current price a reasonable entry, or already extended? ---
-    # Broadened based on backtest evidence: a stock spiking hard TODAY is just
-    # as much "chasing" as one that's been overbought for weeks — buying the
-    # breakout candle's own close tended to buy tops, not launch pads.
-    rsi_extended = rsi is not None and rsi >= config.EXTENDED_RSI_THRESHOLD
-    sma_50 = baseline.get("sma_50")
-    pct_above_sma50 = ((ltp - sma_50) / sma_50 * 100) if sma_50 else None
-    ma_extended = pct_above_sma50 is not None and pct_above_sma50 >= config.EXTENDED_MA_DISTANCE_PCT
-    day_extended = pct_change >= config.EXTENDED_DAY_MOVE_PCT
-    is_extended = rsi_extended or ma_extended or day_extended
-
-    ema_20 = baseline.get("ema_20")
-    if is_extended and ema_20 and ema_20 < ltp:
-        entry = ema_20
-        extended_bits = []
-        if day_extended:
-            extended_bits.append(f"up {pct_change:.1f}% today already")
-        if rsi_extended:
-            extended_bits.append(f"RSI {rsi:.0f}")
-        if ma_extended:
-            extended_bits.append(f"{pct_above_sma50:.0f}% above 50-day average")
-        entry_note = (f"stock looks extended ({', '.join(extended_bits)}) — "
-                      f"proposed entry is a pullback to the 20-day EMA (₹{entry:.2f}), "
-                      f"not today's price (₹{ltp:.2f})")
-    else:
-        entry = ltp
-        entry_note = "current market price"
-
-    # --- Stop-loss: anchored to the actual recent swing low, capped by ATR ---
     atr = baseline.get("atr_14")
-    swing_low = baseline.get("swing_low")
-    stop_candidates = []
-    if swing_low and swing_low < entry:
-        stop_candidates.append(("recent swing low", swing_low * (1 - config.SWING_LOW_BUFFER_PCT / 100)))
-    if atr:
-        stop_candidates.append(("ATR-based cap", entry - config.STOP_LOSS_MAX_ATR_MULTIPLIER * atr))
-    if not stop_candidates:
-        stop_loss = entry * (1 - config.STOP_LOSS_PCT_FALLBACK / 100)
-        stop_basis = "flat % fallback (insufficient history for ATR/swing low)"
-    elif len(stop_candidates) == 1:
-        stop_basis, stop_loss = stop_candidates[0]
-    else:
-        # Use the swing low, but never let it be wider than the ATR-based cap
-        (_, swing_stop), (_, atr_cap) = stop_candidates
-        if swing_stop >= atr_cap:
-            stop_loss, stop_basis = swing_stop, "recent swing low"
-        else:
-            stop_loss, stop_basis = atr_cap, f"ATR cap (swing low was wider than {config.STOP_LOSS_MAX_ATR_MULTIPLIER}x ATR away)"
-    stop_loss = max(stop_loss, 0.01)  # never let logic produce a non-positive price
+    long_term = long_term or {}
 
-    # --- Target: prefer real prior resistance over a formula, when one qualifies ---
-    target_from_min_pct = entry * (1 + config.TARGET_RETURN_MIN_PCT / 100)
-    resistance_candidates = [
-        lvl for lvl in (baseline.get("high_52w"), baseline.get("high_3y"),
-                         baseline.get("high_5y"), baseline.get("all_time_high"))
-        if lvl and lvl >= target_from_min_pct
-    ]
-    if resistance_candidates:
-        target = min(resistance_candidates)  # nearest qualifying resistance above entry
-        target_basis = "prior historical resistance"
-    elif atr:
-        atr_multiplier = config.TARGET_ATR_BASE_MULTIPLIER + \
-            max(0, score - config.MIN_SIGNAL_SCORE) * config.TARGET_ATR_SCORE_STEP
-        target = max(entry + atr_multiplier * atr, target_from_min_pct)
-        target_basis = "volatility/momentum projection (no qualifying resistance level found)"
-    else:
-        target = target_from_min_pct
-        target_basis = "minimum-expectation floor (insufficient data for ATR or resistance)"
+    extended = _is_extended(pct_change, rsi, ltp, high_20d)
+    entry, entry_note = _propose_entry(ltp, atr, high_20d, long_term.get("supports"), extended)
+    target, stop_loss, levels_basis = _propose_target_stop(entry, atr, long_term, score, config.MIN_SIGNAL_SCORE)
 
+    stop_loss = max(stop_loss, 0.01)  # never let a formula produce a non-positive price
     risk = entry - stop_loss
     reward = target - entry
     risk_reward = (reward / risk) if risk > 0 else None
-    favorable = risk_reward is not None and risk_reward >= config.MIN_RISK_REWARD_TO_ALERT
 
     return {
         "symbol": symbol,
@@ -185,12 +218,11 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None):
         "max_score": len(checks),
         "reasons": reasons,
         "date": datetime.now(_IST).strftime("%Y-%m-%d"),
+        "extended": extended,
         "entry": round(entry, 2),
         "entry_note": entry_note,
         "target": round(target, 2),
-        "target_basis": target_basis,
         "stop_loss": round(stop_loss, 2),
-        "stop_basis": stop_basis,
+        "levels_basis": levels_basis,
         "risk_reward": round(risk_reward, 2) if risk_reward is not None else None,
-        "favorable": favorable,
     }
