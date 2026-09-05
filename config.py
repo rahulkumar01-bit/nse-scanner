@@ -78,6 +78,7 @@ LONG_HISTORY_YEARS = 15             # how far back to pull daily history for lon
 # Entry: is the stock already extended (late-stage move), or a reasonable entry now?
 EXTENDED_RSI_THRESHOLD = 70.0        # RSI(14) at/above this = overbought
 EXTENDED_MA_DISTANCE_PCT = 12.0      # price this much above its 50-day SMA = stretched
+EXTENDED_DAY_MOVE_PCT = 4.0          # today's own move this big = also "extended" (buying the spike, not just multi-week overbought)
 PULLBACK_EMA_PERIOD = 20             # when extended, proposed entry = this EMA instead of chasing current price
 
 # Stop-loss: anchored to the actual recent swing low (real support), not just a formula
