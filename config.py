@@ -70,51 +70,35 @@ FNO_MAX_EXPIRIES = 3                # scan the current + next N-1 monthly future
 
 # ---------------------------------------------------------------------------
 # Entry / target / stop-loss shown in each alert email. These are HEURISTIC
-# technical levels derived from formulas below — not personalized advice.
-# Position sizing and the final call are yours.
+# technical levels derived from the formulas/logic below — not personalized
+# advice. Position sizing and the final call are yours.
 # ---------------------------------------------------------------------------
-TARGET_RETURN_MIN_PCT = 10.0        # floor: target is never below entry * (1 + this/100) — your minimum expectation
-TARGET_ATR_BASE_MULTIPLIER = 2.5    # target = entry + (this * ATR-14), scaled up further by signal strength below
-TARGET_ATR_SCORE_STEP = 0.5         # each point of signal score above MIN_SIGNAL_SCORE adds this much to the ATR multiplier
+LONG_HISTORY_YEARS = 15             # how far back to pull daily history for long-term levels (52wk/3y/5y/all-time highs)
+
+# Entry: is the stock already extended (late-stage move), or a reasonable entry now?
+EXTENDED_RSI_THRESHOLD = 70.0        # RSI(14) at/above this = overbought
+EXTENDED_MA_DISTANCE_PCT = 12.0      # price this much above its 50-day SMA = stretched
+EXTENDED_DAY_MOVE_PCT = 4.0          # today's own move this big = also "extended" (buying the spike, not just multi-week overbought)
+PULLBACK_EMA_PERIOD = 20             # when extended, proposed entry = this EMA instead of chasing current price
+
+# Stop-loss: anchored to the actual recent swing low (real support), not just a formula
+SWING_LOW_LOOKBACK_DAYS = 20
+SWING_LOW_BUFFER_PCT = 1.0           # stop sits this much below the swing low, not exactly on it
+STOP_LOSS_ATR_MULTIPLIER = 1.5       # fallback/cap basis: stop = entry - (this * ATR-14)
+STOP_LOSS_MAX_ATR_MULTIPLIER = 3.0   # never let the swing-low stop be wider than this many ATRs from entry
+STOP_LOSS_PCT_FALLBACK = 4.0         # used only if ATR AND swing low are both unavailable
 ATR_PERIOD = 14
-STOP_LOSS_ATR_MULTIPLIER = 1.5      # stop = entry - (this * ATR-14); wider ATR = more room, tighter = less
-STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. insufficient history)
 
-# ---------------------------------------------------------------------------
-# Long-term historical analysis (up to LONG_HISTORY_YEARS of daily data per
-# symbol, weekly-cached). Used to (a) judge whether today's move already
-# looks late-stage and propose a pullback entry instead of chasing the live
-# price, and (b) ground target/stop-loss in this specific stock's own past
-# behaviour rather than a generic ATR multiplier, where enough history and
-# enough matching past setups exist. Falls back to the ATR-based method
-# above when they don't (new listings, thin history).
-# ---------------------------------------------------------------------------
-LONG_HISTORY_YEARS = 15                  # yfinance returns whatever's actually available if the stock has traded less
-LONG_TERM_CACHE_REFRESH_DAYS = 7         # re-download/re-derive weekly, not daily — this data barely moves day to day
-LONG_TERM_ATR_PERIOD = 252               # ~1 trading year — a steadier read on "normal" volatility than ATR-14, which is itself often inflated mid-breakout
+# Target: prefer real prior resistance (52wk/3y/5y/all-time high) over a formula, when
+# one exists above entry and clears your minimum — else fall back to a volatility+
+# signal-strength projection, same idea as before.
+TARGET_RETURN_MIN_PCT = 10.0        # floor: target is never below entry * (1 + this/100) — your minimum expectation
+TARGET_ATR_BASE_MULTIPLIER = 2.5    # fallback formula: entry + (this * ATR-14), scaled up further by signal strength
+TARGET_ATR_SCORE_STEP = 0.5         # each point of signal score above MIN_SIGNAL_SCORE adds this much to the ATR multiplier
 
-# Swing high/low (pivot) detection, used for support/resistance levels
-PIVOT_WINDOW_DAYS = 10                   # a bar is a pivot if it's the highest/lowest within +/- this many trading days
-PIVOT_CLUSTER_PCT = 2.0                  # merge pivot levels within this % of each other into one zone
-
-# Per-symbol backtest: among all past days this stock had a signal-like setup
-# (N-day breakout + RSI momentum, matching screener.py's own checks), what
-# happened over the next N trading days?
-BREAKOUT_BACKTEST_FORWARD_DAYS = 10
-BREAKOUT_BACKTEST_MIN_SAMPLES = 8        # below this many historical occurrences, don't trust the pattern stats — fall back to ATR
-
-# "Is the runup already extended?" — if any of these fire, don't recommend
-# chasing the live price; propose a pullback entry instead.
-RSI_EXTENDED_THRESHOLD = 78              # RSI-14 (yesterday's close) at/above this = already quite overbought
-EXTENDED_DAY_MOVE_PCT = 8.0              # today's single-day move at/above this = risk of chasing a spike
-EXTENDED_ABOVE_BREAKOUT_PCT = 5.0        # LTP already this much % above the 20-day high (not just freshly through it)
-
-PULLBACK_ATR_MULTIPLIER = 1.0            # fallback pullback size (x ATR-14) when no historical support level is nearby
-SUPPORT_SEARCH_MAX_PCT_BELOW = 15.0      # how far below price to look for a usable historical support (pullback entry / structural stop)
-RESISTANCE_SEARCH_MAX_PCT_ABOVE = 20.0   # how far above entry to look for a resistance level that should cap the target
-SUPPORT_BUFFER_PCT = 1.0                 # place a structural stop this % below the raw support level, not exactly on it
-STOP_LOSS_MIN_ATR_MULTIPLIER = 0.5       # bounds on the pattern/support-based stop distance, in units of the long-term (252d) ATR —
-STOP_LOSS_MAX_ATR_MULTIPLIER = 3.0       # keeps a historically-derived stop from being unrealistically tight or absurdly wide
+# Only actually email when the resulting risk:reward clears this bar — otherwise the
+# setup is logged (visible in the Actions run log) but no email is sent.
+MIN_RISK_REWARD_TO_ALERT = 1.5
 
 # ---------------------------------------------------------------------------
 # Scan schedule

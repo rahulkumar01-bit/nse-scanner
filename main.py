@@ -56,7 +56,30 @@ def is_market_open(now=None):
     return open_t <= now.time() <= close_t
 
 
-def run_scan(kc, token_map, universe, yf_baseline, long_term_stats):
+def _handle_result(result, instrument_key, alerts):
+    """
+    A result clearing MIN_SIGNAL_SCORE always gets deduped/logged; it only
+    goes in the emailed batch if screener.evaluate() marked it "favorable"
+    (risk:reward clears config.MIN_RISK_REWARD_TO_ALERT). Otherwise it's
+    guidance only — visible in the run log, no email sent.
+    """
+    if not result or not state_store.should_alert(*instrument_key):
+        return
+    state_store.mark_alerted(*instrument_key)
+    if result["favorable"]:
+        alerts.append(result)
+    else:
+        log.info(
+            "Guidance only (not emailed — risk:reward %.2f below %.1f threshold): "
+            "%s entry ₹%.2f target ₹%.2f (%s) stop ₹%.2f (%s)",
+            result["risk_reward"] if result["risk_reward"] is not None else float("nan"),
+            config.MIN_RISK_REWARD_TO_ALERT,
+            result["symbol"], result["entry"], result["target"], result["target_basis"],
+            result["stop_loss"], result["stop_basis"],
+        )
+
+
+def run_scan(kc, token_map, universe, yf_baseline):
     alerts = []
     for symbol in universe:
         try:
@@ -64,16 +87,12 @@ def run_scan(kc, token_map, universe, yf_baseline, long_term_stats):
             if not baseline:
                 continue  # no Yahoo Finance baseline available for this symbol — skip it
 
-            long_term = long_term_stats.get(symbol)
-
             if config.SCAN_EQUITIES:
                 token = token_map.get(symbol)
                 if token:
                     live = data_fetcher.fetch_live_quote(kc, token, exchange_segment="nse_cm")
-                    result = screener.evaluate(symbol, baseline, live, instrument="EQ", long_term=long_term)
-                    if result and state_store.should_alert(symbol, "EQ"):
-                        alerts.append(result)
-                        state_store.mark_alerted(symbol, "EQ")
+                    result = screener.evaluate(symbol, baseline, live, instrument="EQ")
+                    _handle_result(result, (symbol, "EQ"), alerts)
 
             if config.SCAN_FNO:
                 # Scans the current + next few monthly expiries (config.FNO_MAX_EXPIRIES),
@@ -92,10 +111,8 @@ def run_scan(kc, token_map, universe, yf_baseline, long_term_stats):
                     # cash-market history — Kotak doesn't expose historical futures
                     # candles either, and stock futures track the underlying closely.
                     result = screener.evaluate(symbol, baseline, live_fut, instrument=instrument_label,
-                                                oi_change_pct=oi_change_pct, long_term=long_term)
-                    if result and state_store.should_alert(symbol, instrument_label):
-                        alerts.append(result)
-                        state_store.mark_alerted(symbol, instrument_label)
+                                                oi_change_pct=oi_change_pct)
+                    _handle_result(result, (symbol, instrument_label), alerts)
 
         except Exception:
             log.exception("Error screening %s", symbol)
@@ -128,10 +145,9 @@ def main():
     log.info("Resolved %d/%d symbols to instrument tokens", len(token_map), len(universe))
 
     yf_baseline = data_fetcher.fetch_yf_baseline_batch(universe)
-    long_term_stats = data_fetcher.fetch_long_term_stats_batch(universe)
 
     if args.once:
-        run_scan(kc, token_map, universe, yf_baseline, long_term_stats)
+        run_scan(kc, token_map, universe, yf_baseline)
         return
 
     log.info("Starting continuous scan loop (every %d min, %s-%s %s)",
@@ -139,11 +155,10 @@ def main():
     while True:
         if is_market_open():
             kc.ensure_session()
-            # Cheap no-op most of the day (cache hit) — yf_baseline only actually
-            # re-fetches once per calendar day, long_term_stats only once a week.
+            # Cheap no-op most of the day (cache hit) — only actually re-fetches
+            # from Yahoo Finance once, right after the calendar date rolls over.
             yf_baseline = data_fetcher.fetch_yf_baseline_batch(universe)
-            long_term_stats = data_fetcher.fetch_long_term_stats_batch(universe)
-            run_scan(kc, token_map, universe, yf_baseline, long_term_stats)
+            run_scan(kc, token_map, universe, yf_baseline)
             time.sleep(config.SCAN_INTERVAL_MINUTES * 60)
         else:
             log.info("Market closed — sleeping 10 min")
