@@ -62,7 +62,9 @@ VOLUME_SURGE_MULTIPLE = 2.5        # today's volume vs 20-day average volume
 BREAKOUT_LOOKBACK_DAYS = 20         # "N-day high" breakout lookback
 RSI_PERIOD = 14
 RSI_MOMENTUM_MIN = 60               # RSI should be above this and rising
-MIN_SIGNAL_SCORE = 3                # out of the 5 checks in screener.py, how many must fire to alert
+MIN_SIGNAL_SCORE = 4                # out of the 5 checks in screener.py, how many must fire to alert
+                                     # (was 3 — raised after backtesting to require stronger confluence; re-run the
+                                     # backtest's new summarize_by_score() breakdown to confirm this is the right bar)
 
 # F&O-specific (only used if quote data includes open interest)
 OI_CHANGE_PCT_THRESHOLD = 8.0       # today's OI build-up, in %, for "long buildup" confirmation
@@ -82,9 +84,11 @@ TARGET_ATR_SCORE_STEP = 0.5         # each point of signal score above MIN_SIGNA
 ATR_PERIOD = 14
 STOP_LOSS_ATR_MULTIPLIER = 1.5      # stop = entry - (this * ATR-14); wider ATR = more room, tighter = less
 STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. insufficient history)
-MIN_RISK_REWARD_TO_ALERT = None     # e.g. set to 1.5 to only alert on setups where (target-entry)/(entry-stop) >= 1.5,
-                                     # skipping weaker-odds setups entirely rather than alerting on everything.
-                                     # None = disabled (alert regardless of R:R, current default).
+MIN_RISK_REWARD_TO_ALERT = 2.0      # only alert on setups where (target-entry)/(entry-stop) >= 2.0, skipping weaker-odds
+                                     # setups entirely. Backtesting showed R:R>=1.0 and >=1.5 barely moved average
+                                     # return (most signals already cleared those bars), but R:R>=2.0 nearly doubled
+                                     # it (+0.47% -> +0.85% per trade) — at the cost of firing on only ~23% as many
+                                     # signals. Set to None to disable and alert regardless of R:R.
 
 # ---------------------------------------------------------------------------
 # Long-term historical analysis (up to LONG_HISTORY_YEARS of daily data per
@@ -108,7 +112,7 @@ PIVOT_CLUSTER_PCT = 2.0                  # merge pivot levels within this % of e
 # happened over the next HOLDING_PERIOD_DAYS trading days — deliberately a
 # short window, matching how these alerts are actually meant to be traded
 # (in and out within about a week, not held indefinitely).
-HOLDING_PERIOD_DAYS = 6                  # ~5-7 trading days — the actual intended holding window
+HOLDING_PERIOD_DAYS = 10                 # ~10 trading days (was 6) — the actual intended holding window
 BREAKOUT_BACKTEST_FORWARD_DAYS = HOLDING_PERIOD_DAYS
 BREAKOUT_BACKTEST_MIN_SAMPLES = 8        # below this many historical occurrences, don't trust the pattern stats — fall back to ATR
 BREAKOUT_TARGET_PERCENTILE = 75          # use the 75th percentile (a strong-but-real historical outcome, achieved by
@@ -136,12 +140,13 @@ SUPPORT_BUFFER_PCT = 1.0                 # place a structural stop this % below 
 LONG_ATR_MAX_RATIO_TO_SHORT = 2.5        # cap the long-term (252d) daily ATR at this multiple of the current 14d ATR,
                                           # so a stock's sizing isn't dominated by an old volatility spike from years ago
 STOP_LOSS_MIN_ATR_MULTIPLIER = 0.35      # bounds on the pattern/support-based stop distance, in units of the
-STOP_LOSS_MAX_ATR_MULTIPLIER = 0.85       # holding-period-scaled ATR. NOTE: these get multiplied by sqrt(HOLDING_PERIOD_DAYS)
-                                          # (~2.45x for 6 days) — so the EFFECTIVE range is ~0.86x-2.08x ATR-14, deliberately
-                                          # calibrated to land close to (not far past) the old flat method's 1.5x ATR-14.
-                                          # (First pass used 0.5/2.0 without accounting for that multiplication, which gave an
-                                          # effective ceiling of ~4.9x ATR-14 — over 3x wider than intended — confirmed by
-                                          # backtesting to be inflating average losses despite a much-improved win rate.)
+STOP_LOSS_MAX_ATR_MULTIPLIER = 0.85      # holding-period-scaled ATR. NOTE: these get multiplied by sqrt(HOLDING_PERIOD_DAYS)
+                                          # (~3.16x for 10 days) — so the EFFECTIVE range is ~1.11x-2.69x ATR-14, moderately
+                                          # wider than the old flat method's 1.5x ATR-14, appropriate for a longer hold.
+                                          # (At 6 days this was ~0.86x-2.08x; the last backtest at that setting showed a
+                                          # 55% stop-out rate — plausibly too tight, shaking out setups on ordinary
+                                          # noise/pullback before the real move played out. Re-check this in the next
+                                          # backtest run before tightening further.)
 
 # ---------------------------------------------------------------------------
 # Scan schedule

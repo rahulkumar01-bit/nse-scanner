@@ -42,9 +42,10 @@ import config
 import data_fetcher
 import screener
 
-MAX_HOLDING_DAYS = 7         # matches the actual intended holding window (see config.HOLDING_PERIOD_DAYS) — time-based
-                             # exit if neither target nor stop hits within this many trading days
-FILL_WINDOW_DAYS = 3         # a pullback entry needs to fill fast to still be relevant for a ~week-long trade
+MAX_HOLDING_DAYS = config.HOLDING_PERIOD_DAYS  # always matches the live methodology's actual holding intent —
+                                                # derived directly from config, not a separate hardcoded number,
+                                                # after a hardcoded mismatch here caused a real sizing bug once already
+FILL_WINDOW_DAYS = max(config.HOLDING_PERIOD_DAYS // 2, 2)  # a pullback entry needs to fill reasonably fast to still be relevant
 LONG_TERM_REFRESH_EVERY = 5  # trading days between long-term-stats recomputation (mirrors the weekly production cache)
 
 
@@ -163,6 +164,7 @@ def backtest_symbol(symbol, hist, months):
         results.append({
             "symbol": symbol, "date": str(df.index[t].date()), "score": sig["score"],
             "extended": sig["extended"], "levels_basis": sig["levels_basis"], "levels_method": sig["levels_method"],
+            "sample_size": (long_term_snapshot or {}).get("breakout_sample_size", 0),
             "new_entry": sig["entry"], "new_target": sig["target"], "new_stop": sig["stop_loss"],
             "new_risk_reward": sig["risk_reward"],
             "new_filled": new_result["filled"], "new_outcome": new_result["outcome"],
@@ -221,12 +223,44 @@ def summarize_risk_reward(results):
             summarize(above, f"  If only alerting when R:R >= {threshold}: {len(above)}/{len(results)} signals would have fired", "new")
 
 
+def summarize_by_score(results):
+    """Does requiring more of the 5 signal checks to fire actually predict
+    better outcomes? Direct evidence for tuning MIN_SIGNAL_SCORE, rather
+    than guessing."""
+    for s in sorted(set(r["score"] for r in results)):
+        subset = [r for r in results if r["score"] == s]
+        summarize(subset, f"  -> score = {s}/5 ({len(subset)} signals, {len(subset)/len(results)*100:.0f}% of total)", "new")
+
+
+def summarize_by_sample_size(results, breakpoints=(8, 15, 30)):
+    """Does more historical precedent (more matching past setups found in
+    the per-symbol backtest) predict more reliable outcomes? Direct
+    evidence for tuning BREAKOUT_BACKTEST_MIN_SAMPLES."""
+    bounds = [(0, breakpoints[0])] + list(zip(breakpoints, breakpoints[1:])) + [(breakpoints[-1], float("inf"))]
+    for lo, hi in bounds:
+        subset = [r for r in results if lo <= r.get("sample_size", 0) < hi]
+        if subset:
+            label = f"  -> {lo}-{hi if hi != float('inf') else '∞'} historical matches ({len(subset)} signals)"
+            summarize(subset, label, "new")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--months", type=int, default=6)
     parser.add_argument("--symbols", type=str, default=None, help="comma-separated subset; default = full universe")
     parser.add_argument("--out", type=str, default="backtest_report.json")
     args = parser.parse_args()
+
+    # The backtest should see EVERY signal regardless of the live
+    # MIN_RISK_REWARD_TO_ALERT setting, so summarize_risk_reward() below can
+    # show the full threshold curve — not just whatever's currently live.
+    # (Without this, once that config value is set to e.g. 2.0, evaluate()
+    # would only ever return R:R>=2.0 signals here, collapsing the very
+    # comparison this diagnostic exists to make.)
+    original_min_rr = config.MIN_RISK_REWARD_TO_ALERT
+    config.MIN_RISK_REWARD_TO_ALERT = None
+    print(f"(Note: backtesting with MIN_RISK_REWARD_TO_ALERT temporarily disabled — live config has it set to "
+          f"{original_min_rr!r} — see the R:R breakdown below to judge what that setting should actually be.)\n")
 
     universe = args.symbols.split(",") if args.symbols else data_fetcher.load_universe()
     print(f"Backtesting {len(universe)} symbols over the last {args.months} months "
@@ -257,6 +291,10 @@ def main():
     summarize(all_results, "NEW method (extension-aware entry, pattern/ATR-based target-stop)", "new")
     print("\nNEW method broken down by which basis actually set the target/stop:")
     summarize_by_method(all_results)
+    print("\nNEW method broken down by signal score (does more confluence predict better outcomes?):")
+    summarize_by_score(all_results)
+    print("\nNEW method broken down by amount of historical precedent (does more matching past setups predict better outcomes?):")
+    summarize_by_sample_size(all_results)
     summarize_risk_reward(all_results)
 
     extended = [r for r in all_results if r["extended"]]
@@ -265,6 +303,8 @@ def main():
     if extended:
         fill_rate = sum(1 for r in extended if r["new_filled"]) / len(extended) * 100
         print(f"  Of those, {fill_rate:.0f}% actually got filled at the proposed pullback level within {FILL_WINDOW_DAYS} trading days.")
+
+    config.MIN_RISK_REWARD_TO_ALERT = original_min_rr  # restore, in case this module is ever imported rather than run standalone
 
     with open(args.out, "w") as f:
         json.dump(all_results, f, indent=2, default=str)
