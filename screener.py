@@ -103,16 +103,22 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None):
         reasons.append(f"open interest up {oi_change_pct:.1f}% (long buildup)")
 
     # --- Entry: is the current price a reasonable entry, or already extended? ---
+    # Broadened based on backtest evidence: a stock spiking hard TODAY is just
+    # as much "chasing" as one that's been overbought for weeks — buying the
+    # breakout candle's own close tended to buy tops, not launch pads.
     rsi_extended = rsi is not None and rsi >= config.EXTENDED_RSI_THRESHOLD
     sma_50 = baseline.get("sma_50")
     pct_above_sma50 = ((ltp - sma_50) / sma_50 * 100) if sma_50 else None
     ma_extended = pct_above_sma50 is not None and pct_above_sma50 >= config.EXTENDED_MA_DISTANCE_PCT
-    is_extended = rsi_extended or ma_extended
+    day_extended = pct_change >= config.EXTENDED_DAY_MOVE_PCT
+    is_extended = rsi_extended or ma_extended or day_extended
 
     ema_20 = baseline.get("ema_20")
     if is_extended and ema_20 and ema_20 < ltp:
         entry = ema_20
         extended_bits = []
+        if day_extended:
+            extended_bits.append(f"up {pct_change:.1f}% today already")
         if rsi_extended:
             extended_bits.append(f"RSI {rsi:.0f}")
         if ma_extended:
