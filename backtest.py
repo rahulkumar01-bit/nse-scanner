@@ -162,8 +162,9 @@ def backtest_symbol(symbol, hist, months):
 
         results.append({
             "symbol": symbol, "date": str(df.index[t].date()), "score": sig["score"],
-            "extended": sig["extended"], "levels_basis": sig["levels_basis"],
+            "extended": sig["extended"], "levels_basis": sig["levels_basis"], "levels_method": sig["levels_method"],
             "new_entry": sig["entry"], "new_target": sig["target"], "new_stop": sig["stop_loss"],
+            "new_risk_reward": sig["risk_reward"],
             "new_filled": new_result["filled"], "new_outcome": new_result["outcome"],
             "new_return_pct": new_result["return_pct"], "new_days_held": new_result["days_held"],
             "old_entry": live["ltp"], "old_target": old_target, "old_stop": old_stop,
@@ -193,6 +194,31 @@ def summarize(results, label, key_prefix):
     for r in returns:
         compounded *= (1 + r / 100)
     print(f"  Equal-sized-bet cumulative multiple across all signals (no compounding logic beyond this): {compounded:.2f}x")
+
+
+def summarize_by_method(results):
+    """Breaks NEW-method performance down by which basis actually produced
+    the target/stop (real per-stock historical pattern vs the generic ATR
+    fallback) — this is the key diagnostic for telling whether weak average
+    returns come from the pattern logic itself, or from too many signals
+    simply not having enough historical precedent to use it."""
+    for method in ("pattern", "atr_fallback", "fixed_fallback"):
+        subset = [r for r in results if r["levels_method"] == method]
+        if not subset:
+            continue
+        summarize(subset, f"  -> method = '{method}' ({len(subset)} signals, {len(subset)/len(results)*100:.0f}% of total)", "new")
+
+
+def summarize_risk_reward(results):
+    rr = [r["new_risk_reward"] for r in results if r.get("new_risk_reward") is not None]
+    if not rr:
+        return
+    print(f"\nProposed risk:reward ratio across all signals — median {statistics.median(rr):.2f}, "
+          f"mean {statistics.mean(rr):.2f}, min {min(rr):.2f}, max {max(rr):.2f}")
+    for threshold in (1.0, 1.5, 2.0):
+        above = [r for r in results if r.get("new_risk_reward") is not None and r["new_risk_reward"] >= threshold]
+        if above:
+            summarize(above, f"  If only alerting when R:R >= {threshold}: {len(above)}/{len(results)} signals would have fired", "new")
 
 
 def main():
@@ -229,6 +255,9 @@ def main():
     print(f"\nTotal signals fired: {len(all_results)}")
     summarize(all_results, "OLD method (flat ATR multiplier, always chase LTP)", "old")
     summarize(all_results, "NEW method (extension-aware entry, pattern/ATR-based target-stop)", "new")
+    print("\nNEW method broken down by which basis actually set the target/stop:")
+    summarize_by_method(all_results)
+    summarize_risk_reward(all_results)
 
     extended = [r for r in all_results if r["extended"]]
     print(f"\n{len(extended)} of {len(all_results)} signals were flagged 'extended' "

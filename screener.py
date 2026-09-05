@@ -118,6 +118,7 @@ def _propose_target_stop(entry, atr, long_term, score, min_signal_score):
         else:
             stop_dist = entry * config.STOP_LOSS_PCT_FALLBACK / 100
         stop_loss = entry - stop_dist
+        method = "pattern"
         basis = (f"this stock's own history — {sample_size} similar past setups, "
                  f"top-quartile outcome over ~{config.HOLDING_PERIOD_DAYS} trading days")
     elif atr:
@@ -134,11 +135,13 @@ def _propose_target_stop(entry, atr, long_term, score, min_signal_score):
                 target = resistance
         stop_dist = config.STOP_LOSS_ATR_MULTIPLIER * atr
         stop_loss = entry - stop_dist
+        method = "atr_fallback"
         basis = "ATR-based (not enough matching historical setups yet for a pattern-based estimate)"
     else:
         target = entry * (1 + config.TARGET_RETURN_MIN_PCT / 100)
         stop_dist = entry * config.STOP_LOSS_PCT_FALLBACK / 100
         stop_loss = entry - stop_dist
+        method = "fixed_fallback"
         basis = "fallback percentage (no price history available)"
 
     # A nearby support can only TIGHTEN the stop to a cleaner structural
@@ -150,7 +153,7 @@ def _propose_target_stop(entry, atr, long_term, score, min_signal_score):
             stop_loss = entry - structural_dist
             basis += "; stop tightened to just below a nearby support level"
 
-    return target, stop_loss, basis
+    return target, stop_loss, basis, method
 
 
 def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_term=None):
@@ -230,12 +233,17 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_t
 
     extended = _is_extended(pct_change, rsi, ltp, high_20d)
     entry, entry_note = _propose_entry(ltp, atr, high_20d, long_term.get("supports"), extended)
-    target, stop_loss, levels_basis = _propose_target_stop(entry, atr, long_term, score, config.MIN_SIGNAL_SCORE)
+    target, stop_loss, levels_basis, levels_method = _propose_target_stop(
+        entry, atr, long_term, score, config.MIN_SIGNAL_SCORE)
 
     stop_loss = max(stop_loss, 0.01)  # never let a formula produce a non-positive price
     risk = entry - stop_loss
     reward = target - entry
     risk_reward = (reward / risk) if risk > 0 else None
+
+    if config.MIN_RISK_REWARD_TO_ALERT is not None and \
+            (risk_reward is None or risk_reward < config.MIN_RISK_REWARD_TO_ALERT):
+        return None  # setup fires on the 5 checks, but the odds aren't good enough to bother with
 
     return {
         "symbol": symbol,
@@ -252,5 +260,6 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_t
         "target": round(target, 2),
         "stop_loss": round(stop_loss, 2),
         "levels_basis": levels_basis,
+        "levels_method": levels_method,
         "risk_reward": round(risk_reward, 2) if risk_reward is not None else None,
     }

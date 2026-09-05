@@ -82,6 +82,9 @@ TARGET_ATR_SCORE_STEP = 0.5         # each point of signal score above MIN_SIGNA
 ATR_PERIOD = 14
 STOP_LOSS_ATR_MULTIPLIER = 1.5      # stop = entry - (this * ATR-14); wider ATR = more room, tighter = less
 STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. insufficient history)
+MIN_RISK_REWARD_TO_ALERT = None     # e.g. set to 1.5 to only alert on setups where (target-entry)/(entry-stop) >= 1.5,
+                                     # skipping weaker-odds setups entirely rather than alerting on everything.
+                                     # None = disabled (alert regardless of R:R, current default).
 
 # ---------------------------------------------------------------------------
 # Long-term historical analysis (up to LONG_HISTORY_YEARS of daily data per
@@ -132,8 +135,13 @@ SUPPORT_BUFFER_PCT = 1.0                 # place a structural stop this % below 
 # ATR * sqrt(6), not ATR itself, which is a single day's typical range) —
 LONG_ATR_MAX_RATIO_TO_SHORT = 2.5        # cap the long-term (252d) daily ATR at this multiple of the current 14d ATR,
                                           # so a stock's sizing isn't dominated by an old volatility spike from years ago
-STOP_LOSS_MIN_ATR_MULTIPLIER = 0.5       # bounds on the pattern/support-based stop distance, in units of the
-STOP_LOSS_MAX_ATR_MULTIPLIER = 2.0       # holding-period-scaled ATR (was 3.0 — backtesting showed this produced oversized losses)
+STOP_LOSS_MIN_ATR_MULTIPLIER = 0.35      # bounds on the pattern/support-based stop distance, in units of the
+STOP_LOSS_MAX_ATR_MULTIPLIER = 0.85       # holding-period-scaled ATR. NOTE: these get multiplied by sqrt(HOLDING_PERIOD_DAYS)
+                                          # (~2.45x for 6 days) — so the EFFECTIVE range is ~0.86x-2.08x ATR-14, deliberately
+                                          # calibrated to land close to (not far past) the old flat method's 1.5x ATR-14.
+                                          # (First pass used 0.5/2.0 without accounting for that multiplication, which gave an
+                                          # effective ceiling of ~4.9x ATR-14 — over 3x wider than intended — confirmed by
+                                          # backtesting to be inflating average losses despite a much-improved win rate.)
 
 # ---------------------------------------------------------------------------
 # Scan schedule
