@@ -1,21 +1,25 @@
 name: NSE Scanner Backtest
 
+# Manual-only, one-off analysis job — not part of the live scanning pipeline
+# and never runs on a schedule. Trigger it from the Actions tab whenever you
+# want to check how the current entry/target/stop-loss methodology (in
+# screener.py) would have performed historically.
 on:
   workflow_dispatch:
     inputs:
       months:
-        description: 'How many months back to test'
+        description: "How many trailing months to backtest"
         required: false
-        default: '6'
-      min_score:
-        description: 'Override MIN_SIGNAL_SCORE (blank = use config.py default of 3)'
+        default: "6"
+      symbols:
+        description: "Optional comma-separated subset (e.g. RELIANCE,TCS) — leave blank for the full universe (slower)"
         required: false
-        default: ''
+        default: ""
 
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30   # a full-universe, 15-year-history backtest is heavier than a normal scan
     steps:
       - uses: actions/checkout@v4
 
@@ -28,15 +32,15 @@ jobs:
 
       - name: Run backtest
         run: |
-          ARGS="--months ${{ inputs.months }}"
-          if [ -n "${{ inputs.min_score }}" ]; then
-            ARGS="$ARGS --min-score ${{ inputs.min_score }}"
+          if [ -n "${{ github.event.inputs.symbols }}" ]; then
+            python backtest.py --months "${{ github.event.inputs.months }}" --symbols "${{ github.event.inputs.symbols }}"
+          else
+            python backtest.py --months "${{ github.event.inputs.months }}"
           fi
-          python backtest.py $ARGS
 
-      - name: Upload full results CSV
+      - name: Upload report
         uses: actions/upload-artifact@v4
         with:
-          name: backtest-results
-          path: backtest_results.csv
-          if-no-files-found: ignore
+          name: backtest-report
+          path: backtest_report.json
+          retention-days: 30
