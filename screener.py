@@ -219,6 +219,8 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_t
         return None  # near-unanimous confluence backtested worse than moderate confluence — see config.py
     if config.REQUIRE_MARKET_UPTREND and not market_uptrend:
         return None  # EXPERIMENTAL market-regime filter — see config.py
+    if config.REQUIRE_VOLUME_SURGE and not checks["volume_surge"]:
+        return None  # EXPERIMENTAL — see config.py
 
     reasons = []
     if checks["day_move"]:

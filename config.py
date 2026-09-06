@@ -180,3 +180,13 @@ REQUIRE_MARKET_UPTREND = False      # default OFF. This is a genuinely new hypot
                                      # signal data already explored. Run backtest.py and confirm the "with regime
                                      # filter" comparison actually improves results before turning this on live.
 MARKET_INDEX_SMA_PERIOD = 50        # Nifty above/below its own N-day SMA defines "uptrend" for this filter
+# 12-month backtest result: this filter made things WORSE (+0.51% -> -0.21% avg return on the live config) —
+# leave REQUIRE_MARKET_UPTREND off. Kept here as a tested-and-rejected experiment, not a live recommendation.
+
+REQUIRE_VOLUME_SURGE = False        # EXPERIMENTAL, default OFF. A 12-month check-combination breakdown
+                                     # (backtest.py's summarize_by_check_combo) suggested volume_surge specifically
+                                     # — not just "any 3 of 5" — differentiates quality WITHIN the currently-live
+                                     # score>=3 tier: the two score=3 combos that include volume_surge both did well
+                                     # (+0.51%, +0.45%, n=98/90), the one that doesn't was negative (-0.35%, but only
+                                     # n=29 — thinner evidence). Worth testing via backtest.py's volume-surge
+                                     # comparison before enabling live.

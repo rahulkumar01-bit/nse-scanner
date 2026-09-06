@@ -366,6 +366,21 @@ def summarize_by_check_combo(results, min_n=10):
         print(f"{combo:<55}{n:>6}{filled:>8}{target_pct:>8.0f}%{avg:>+7.2f}%")
 
 
+def summarize_with_volume_surge_filter(results, min_score, max_score, min_rr):
+    """Tests the volume_surge hypothesis directly: does requiring
+    volume_surge specifically (not just any combination totaling the same
+    score) improve the actual proposed live config? Check the sample sizes
+    on each side before trusting this — the underlying combo breakdown that
+    motivated this had a fairly thin sample on the excluded side."""
+    max_score = max_score if max_score is not None else 5
+    base = [r for r in results if min_score <= r["score"] <= max_score and
+            (r.get("new_risk_reward") or 0) >= min_rr]
+    with_volume = [r for r in base if "volume_surge" in (r.get("check_combo") or "")]
+    print("\nVolume-surge requirement comparison (EXPERIMENTAL — not yet enabled live):")
+    summarize(base, f"  Without requiring volume_surge (current live behaviour, {len(base)} signals)", "new")
+    summarize(with_volume, f"  Requiring volume_surge (would restrict to {len(with_volume)}/{len(base)} signals)", "new")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--months", type=int, default=6)
@@ -379,26 +394,26 @@ def main():
     # (Without this, once that config value is set to e.g. 2.0, evaluate()
     # would only ever return R:R>=2.0 signals here, collapsing the very
     # comparison this diagnostic exists to make.)
-    # Same reasoning as the R:R override: MIN_SIGNAL_SCORE and
-    # MAX_SIGNAL_SCORE_TO_ALERT both gate evaluate()'s return the same way
-    # (score outside [MIN, MAX] -> None), so without overriding BOTH,
-    # summarize_by_score() could only ever see whatever score band is
-    # currently live -- making it blind to exactly the comparison it exists
-    # to make. (MAX_SIGNAL_SCORE_TO_ALERT was added after a real instance of
-    # exactly this blind spot with MIN_SIGNAL_SCORE alone — don't add a third
-    # score-gating config value without adding it here too.)
+    # Same reasoning as the R:R override: MIN_SIGNAL_SCORE, MAX_SIGNAL_SCORE_TO_ALERT,
+    # and REQUIRE_VOLUME_SURGE all gate evaluate()'s return the same way, so without
+    # overriding ALL of them, the diagnostic breakdowns could be blind to exactly the
+    # comparison they exist to make. (Added REQUIRE_VOLUME_SURGE here proactively —
+    # don't add a fourth gating config value without adding it here too.)
     original_min_rr = config.MIN_RISK_REWARD_TO_ALERT
     original_min_score = config.MIN_SIGNAL_SCORE
     original_max_score = config.MAX_SIGNAL_SCORE_TO_ALERT
+    original_require_volume = config.REQUIRE_VOLUME_SURGE
     config.MIN_RISK_REWARD_TO_ALERT = None
     config.MIN_SIGNAL_SCORE = 1
     config.MAX_SIGNAL_SCORE_TO_ALERT = None
-    print(f"(Note: backtesting with MIN_RISK_REWARD_TO_ALERT, MIN_SIGNAL_SCORE, and MAX_SIGNAL_SCORE_TO_ALERT "
-          f"temporarily disabled/widened — live config has them at {original_min_rr!r}, {original_min_score!r}, "
-          f"and {original_max_score!r} respectively — see the score and R:R breakdowns below to judge what those "
-          f"settings should actually be. Minor caveat: lowering MIN_SIGNAL_SCORE also slightly inflates the "
-          f"ATR-fallback branch's target sizing bonus, since that branch scales off score-vs-MIN_SIGNAL_SCORE — "
-          f"negligible in practice since most signals use the pattern-based branch, not the ATR fallback.)\n")
+    config.REQUIRE_VOLUME_SURGE = False
+    print(f"(Note: backtesting with MIN_RISK_REWARD_TO_ALERT, MIN_SIGNAL_SCORE, MAX_SIGNAL_SCORE_TO_ALERT, and "
+          f"REQUIRE_VOLUME_SURGE temporarily disabled/widened — live config has them at {original_min_rr!r}, "
+          f"{original_min_score!r}, {original_max_score!r}, and {original_require_volume!r} respectively — see "
+          f"the breakdowns below to judge what those settings should actually be. Minor caveat: lowering "
+          f"MIN_SIGNAL_SCORE also slightly inflates the ATR-fallback branch's target sizing bonus, since that "
+          f"branch scales off score-vs-MIN_SIGNAL_SCORE — negligible in practice since most signals use the "
+          f"pattern-based branch, not the ATR fallback.)\n")
 
     universe = args.symbols.split(",") if args.symbols else data_fetcher.load_universe()
     print(f"Backtesting {len(universe)} symbols over the last {args.months} months "
@@ -444,6 +459,7 @@ def main():
     summarize_grid(all_results)
     summarize_by_period(all_results, original_min_score, original_min_rr or 0, n_periods=2)
     summarize_with_regime_filter(all_results, original_min_score, original_max_score, original_min_rr or 0)
+    summarize_with_volume_surge_filter(all_results, original_min_score, original_max_score, original_min_rr or 0)
 
     extended = [r for r in all_results if r["extended"]]
     print(f"\n{len(extended)} of {len(all_results)} signals were flagged 'extended' "
@@ -455,6 +471,7 @@ def main():
     config.MIN_RISK_REWARD_TO_ALERT = original_min_rr  # restore, in case this module is ever imported rather than run standalone
     config.MIN_SIGNAL_SCORE = original_min_score
     config.MAX_SIGNAL_SCORE_TO_ALERT = original_max_score
+    config.REQUIRE_VOLUME_SURGE = original_require_volume
 
     with open(args.out, "w") as f:
         json.dump(all_results, f, indent=2, default=str)
