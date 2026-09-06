@@ -170,3 +170,13 @@ DEDUPE_HOURS = 6
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "data", "alert_state.json")
 LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "scanner.log")
+
+# ---------------------------------------------------------------------------
+# Market-regime filter (EXPERIMENTAL — see data_fetcher.py's market-trend
+# functions and backtest.py's market-regime comparison section)
+# ---------------------------------------------------------------------------
+REQUIRE_MARKET_UPTREND = False      # default OFF. This is a genuinely new hypothesis (momentum setups may behave
+                                     # differently fighting a broader downtrend) — NOT mined from the per-stock
+                                     # signal data already explored. Run backtest.py and confirm the "with regime
+                                     # filter" comparison actually improves results before turning this on live.
+MARKET_INDEX_SMA_PERIOD = 50        # Nifty above/below its own N-day SMA defines "uptrend" for this filter

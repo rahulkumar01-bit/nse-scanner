@@ -19,6 +19,7 @@ import pytz
 import config
 import data_fetcher
 import notifier
+import outcome_tracker
 import screener
 import state_store
 from kotak_client import KotakClient
@@ -57,7 +58,19 @@ def is_market_open(now=None):
 
 
 def run_scan(kc, token_map, universe, yf_baseline, long_term_stats):
+    try:
+        outcome_tracker.resolve_pending_outcomes()
+    except Exception:
+        log.exception("Failed to resolve pending live outcomes — will retry next cycle")
+
     alerts = []
+    market_uptrend = True
+    if config.REQUIRE_MARKET_UPTREND:
+        try:
+            market_uptrend = data_fetcher.fetch_market_uptrend_cached()
+        except Exception:
+            log.exception("Failed to fetch market-regime trend — failing open (treating as uptrend) this cycle")
+
     for symbol in universe:
         try:
             baseline = yf_baseline.get(symbol)
@@ -70,10 +83,12 @@ def run_scan(kc, token_map, universe, yf_baseline, long_term_stats):
                 token = token_map.get(symbol)
                 if token:
                     live = data_fetcher.fetch_live_quote(kc, token, exchange_segment="nse_cm")
-                    result = screener.evaluate(symbol, baseline, live, instrument="EQ", long_term=long_term)
+                    result = screener.evaluate(symbol, baseline, live, instrument="EQ", long_term=long_term,
+                                                market_uptrend=market_uptrend)
                     if result and state_store.should_alert(symbol, "EQ"):
                         alerts.append(result)
                         state_store.mark_alerted(symbol, "EQ")
+                        outcome_tracker.record_alert(result)
 
             if config.SCAN_FNO:
                 # Scans the current + next few monthly expiries (config.FNO_MAX_EXPIRIES),
@@ -92,7 +107,8 @@ def run_scan(kc, token_map, universe, yf_baseline, long_term_stats):
                     # cash-market history — Kotak doesn't expose historical futures
                     # candles either, and stock futures track the underlying closely.
                     result = screener.evaluate(symbol, baseline, live_fut, instrument=instrument_label,
-                                                oi_change_pct=oi_change_pct, long_term=long_term)
+                                                oi_change_pct=oi_change_pct, long_term=long_term,
+                                                market_uptrend=market_uptrend)
                     if result and state_store.should_alert(symbol, instrument_label):
                         alerts.append(result)
                         state_store.mark_alerted(symbol, instrument_label)

@@ -119,7 +119,7 @@ def old_target_stop(entry, atr, score):
     return target, max(stop_loss, 0.01)
 
 
-def backtest_symbol(symbol, hist, months):
+def backtest_symbol(symbol, hist, months, market_trend_series=None):
     df = _prep_history(hist)
     if len(df) < 300:
         return []  # not enough history for baseline + long-term stats to mean anything
@@ -145,7 +145,14 @@ def backtest_symbol(symbol, hist, months):
         baseline = b.to_dict()
         live = {"ltp": df["close"].iloc[t], "volume": df["volume"].iloc[t], "oi": None}
 
-        sig = screener.evaluate(symbol, baseline, live, long_term=long_term_snapshot)
+        # Always compute the signal regardless of market regime — the flag is
+        # recorded and filtered post-hoc (see summarize_with_regime_filter),
+        # the same pattern already used for the score/R:R comparisons, so this
+        # doesn't require re-running the backtest to test the hypothesis.
+        market_uptrend = (data_fetcher.get_market_trend_as_of(market_trend_series, df.index[t])
+                           if market_trend_series is not None else True)
+
+        sig = screener.evaluate(symbol, baseline, live, long_term=long_term_snapshot, market_uptrend=market_uptrend)
         if not sig:
             continue
 
@@ -165,6 +172,7 @@ def backtest_symbol(symbol, hist, months):
             "symbol": symbol, "date": str(df.index[t].date()), "score": sig["score"],
             "extended": sig["extended"], "levels_basis": sig["levels_basis"], "levels_method": sig["levels_method"],
             "sample_size": (long_term_snapshot or {}).get("breakout_sample_size", 0),
+            "market_uptrend": market_uptrend,
             "new_entry": sig["entry"], "new_target": sig["target"], "new_stop": sig["stop_loss"],
             "new_risk_reward": sig["risk_reward"],
             "new_filled": new_result["filled"], "new_outcome": new_result["outcome"],
@@ -314,6 +322,20 @@ def summarize_by_period(results, min_score, min_rr, n_periods=2):
             summarize(piece, f"  Period {i+1}: {piece[0]['date']} to {piece[-1]['date']}", "new")
 
 
+def summarize_with_regime_filter(results, min_score, max_score, min_rr):
+    """Tests the market-regime hypothesis directly: does restricting the
+    actual proposed live config (score/R:R filters) to only fire when Nifty
+    itself was in an uptrend improve or hurt performance? This is the
+    evidence to check BEFORE ever setting config.REQUIRE_MARKET_UPTREND=True."""
+    max_score = max_score if max_score is not None else 5
+    base = [r for r in results if min_score <= r["score"] <= max_score and
+            (r.get("new_risk_reward") or 0) >= min_rr]
+    with_filter = [r for r in base if r.get("market_uptrend")]
+    print("\nMarket-regime filter comparison (EXPERIMENTAL — not yet enabled live):")
+    summarize(base, f"  Without regime filter (current live behaviour, {len(base)} signals)", "new")
+    summarize(with_filter, f"  With regime filter (would restrict to {len(with_filter)}/{len(base)} signals)", "new")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--months", type=int, default=6)
@@ -358,6 +380,11 @@ def main():
     raw = yf.download(tickers=tickers, start=from_date.strftime("%Y-%m-%d"), end=to_date.strftime("%Y-%m-%d"),
                        group_by="ticker", progress=True, auto_adjust=False, threads=True)
 
+    print("Fetching Nifty history for the market-regime comparison (experimental, not yet live)...")
+    market_trend_series = data_fetcher.fetch_market_trend_series()
+    if market_trend_series is None:
+        print("  Could not fetch Nifty history — regime comparison will be skipped this run.")
+
     all_results = []
     for symbol in universe:
         ticker = f"{symbol}.NS"
@@ -368,7 +395,7 @@ def main():
         if hist is None or hist.empty:
             continue
         try:
-            all_results.extend(backtest_symbol(symbol, hist, args.months))
+            all_results.extend(backtest_symbol(symbol, hist, args.months, market_trend_series=market_trend_series))
         except Exception as e:
             print(f"  {symbol}: backtest error — {e}")
 
@@ -385,6 +412,7 @@ def main():
     summarize_combined_filter(all_results, original_min_score, original_max_score, original_min_rr or 0)
     summarize_grid(all_results)
     summarize_by_period(all_results, original_min_score, original_min_rr or 0, n_periods=2)
+    summarize_with_regime_filter(all_results, original_min_score, original_max_score, original_min_rr or 0)
 
     extended = [r for r in all_results if r["extended"]]
     print(f"\n{len(extended)} of {len(all_results)} signals were flagged 'extended' "

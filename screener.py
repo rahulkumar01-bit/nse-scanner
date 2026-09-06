@@ -156,7 +156,7 @@ def _propose_target_stop(entry, atr, long_term, score, min_signal_score):
     return target, stop_loss, basis, method
 
 
-def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_term=None):
+def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_term=None, market_uptrend=True):
     """
     baseline: dict from data_fetcher._compute_baseline_stats() (yesterday
       and earlier — avg_volume_20d, high_20d, rsi_14, prev_rsi_14,
@@ -217,6 +217,8 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_t
         return None
     if config.MAX_SIGNAL_SCORE_TO_ALERT is not None and score > config.MAX_SIGNAL_SCORE_TO_ALERT:
         return None  # near-unanimous confluence backtested worse than moderate confluence — see config.py
+    if config.REQUIRE_MARKET_UPTREND and not market_uptrend:
+        return None  # EXPERIMENTAL market-regime filter — see config.py
 
     reasons = []
     if checks["day_move"]:

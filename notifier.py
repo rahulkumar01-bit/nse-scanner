@@ -4,6 +4,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import config
+import outcome_tracker
 
 log = logging.getLogger("nse_scanner.notifier")
 
@@ -40,6 +41,14 @@ def _format_email(alerts):
                 lines.append(f"    Target/stop basis: {a['levels_basis']}")
         lines.append("")
     lines.append("-" * 60)
+    live_summary = None
+    try:
+        live_summary = outcome_tracker.summarize_resolved()
+    except Exception:
+        log.exception("Failed to summarize live outcome tracker for email footer")
+    if live_summary:
+        lines.append(live_summary)
+        lines.append("-" * 60)
     lines.append(DISCLAIMER)
     return "\n".join(lines)
 

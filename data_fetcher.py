@@ -448,6 +448,81 @@ def _compute_long_term_stats(hist):
     }
 
 
+# ---------------------------------------------------------------------------
+# Optional market-regime filter (EXPERIMENTAL, off by default — see
+# config.REQUIRE_MARKET_UPTREND). Hypothesis: momentum setups may behave
+# differently when the broader market itself is trending up vs down. This is
+# a genuinely different lever from the per-stock signal thresholds already
+# tuned elsewhere — a new hypothesis, not something mined from the same
+# signal data. Untested until backtest.py's market-regime comparison is run;
+# don't enable live before checking that.
+# ---------------------------------------------------------------------------
+MARKET_INDEX_TICKER = "^NSEI"  # Nifty 50
+MARKET_TREND_CACHE_FILE = os.path.join(os.path.dirname(__file__), "data", "market_trend_cache.json")
+
+
+def fetch_market_trend_series(years=None):
+    """Fetches the market index's daily history and returns a pandas Series
+    of booleans (close > its own MARKET_INDEX_SMA_PERIOD-day SMA), indexed
+    by date — for backtest.py to look up historically. Returns None on any
+    fetch failure (caller should fail open, not block all alerts on a
+    data gap)."""
+    years = years or config.LONG_HISTORY_YEARS
+    to_date = datetime.now()
+    from_date = to_date - timedelta(days=int(years * 365.25))
+    try:
+        hist = yf.download(MARKET_INDEX_TICKER, start=from_date.strftime("%Y-%m-%d"),
+                            end=to_date.strftime("%Y-%m-%d"), progress=False, auto_adjust=False)
+    except Exception:
+        log.exception("Failed to fetch %s history for market-regime filter", MARKET_INDEX_TICKER)
+        return None
+    if hist is None or hist.empty:
+        return None
+    hist.columns = [c[0] if isinstance(c, tuple) else c for c in hist.columns]
+    hist = hist.rename(columns=str.lower).sort_index()
+    sma = hist["close"].rolling(config.MARKET_INDEX_SMA_PERIOD).mean()
+    return hist["close"] > sma
+
+
+def get_market_trend_as_of(trend_series, date):
+    """Looks up whether the market was in an uptrend as of the most recent
+    trading day STRICTLY BEFORE `date` — mirrors the rest of the codebase's
+    yesterday-only baseline convention (no lookahead). Fails open (returns
+    True / "don't restrict") if data is unavailable, so a gap in index data
+    can't silently suppress every alert."""
+    if trend_series is None or trend_series.empty:
+        return True
+    prior = trend_series[trend_series.index < pd.Timestamp(date)]
+    if prior.empty:
+        return True
+    return bool(prior.iloc[-1])
+
+
+def fetch_market_uptrend_cached():
+    """Daily-cached current market-regime flag for LIVE use — avoids
+    re-fetching the index's full history every 10-minute scan cycle. Only 2
+    years of history is fetched here (plenty for a much-shorter SMA window),
+    not the full LONG_HISTORY_YEARS used for the per-stock pattern analysis."""
+    if os.path.exists(MARKET_TREND_CACHE_FILE):
+        try:
+            with open(MARKET_TREND_CACHE_FILE) as f:
+                cache = json.load(f)
+            if cache.get("date") == _today_ist_str():
+                return cache.get("uptrend", True)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    trend_series = fetch_market_trend_series(years=2)
+    uptrend = bool(trend_series.iloc[-1]) if trend_series is not None and not trend_series.empty else True
+    try:
+        os.makedirs(os.path.dirname(MARKET_TREND_CACHE_FILE), exist_ok=True)
+        with open(MARKET_TREND_CACHE_FILE, "w") as f:
+            json.dump({"date": _today_ist_str(), "uptrend": uptrend}, f)
+    except OSError:
+        log.exception("Failed to write market trend cache (non-fatal)")
+    return uptrend
+
+
 def fetch_long_term_stats_batch(symbols, years=None):
     """Returns {symbol: long_term_stats_dict}. Weekly-cached — see module
     docstring above."""
