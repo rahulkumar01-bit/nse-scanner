@@ -69,6 +69,9 @@ MIN_SIGNAL_SCORE = 3                # out of the 5 checks in screener.py, how ma
                                      # confluence didn't mean better setups here, likely because requiring near-
                                      # unanimous signals sometimes just means the move is already extended/climactic,
                                      # not healthier. Don't raise this again without similar evidence.)
+MAX_SIGNAL_SCORE_TO_ALERT = 3       # exclude score 4-5 setups entirely — replicated across TWO separate backtest runs
+                                     # showing they underperform score=3 (70-86% stop-out rates both times), not just
+                                     # noise from a small sample. Set to None to disable and allow any score >= MIN_SIGNAL_SCORE.
 
 # F&O-specific (only used if quote data includes open interest)
 OI_CHANGE_PCT_THRESHOLD = 8.0       # today's OI build-up, in %, for "long buildup" confirmation
@@ -88,12 +91,11 @@ TARGET_ATR_SCORE_STEP = 0.5         # each point of signal score above MIN_SIGNA
 ATR_PERIOD = 14
 STOP_LOSS_ATR_MULTIPLIER = 1.5      # stop = entry - (this * ATR-14); wider ATR = more room, tighter = less
 STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. insufficient history)
-MIN_RISK_REWARD_TO_ALERT = 1.5      # only alert on setups where (target-entry)/(entry-stop) >= 1.5, skipping weaker-odds
-                                     # setups entirely. Backtested on a 3151-signal sample: R:R>=1.0 barely moved avg
-                                     # return (+0.05%, most signals already clear it), R:R>=1.5 captured most of the
-                                     # real improvement (+0.20%) at 64% of volume, and R:R>=2.0 only added another
-                                     # +0.02% while cutting volume roughly in half again — diminishing returns past
-                                     # 1.5. Set to None to disable and alert regardless of R:R.
+MIN_RISK_REWARD_TO_ALERT = 2.0      # only alert on setups where (target-entry)/(entry-stop) >= 2.0, skipping weaker-odds
+                                     # setups entirely. Within the score==3 subset specifically (the group MAX_SIGNAL_
+                                     # SCORE_TO_ALERT now isolates), R:R>=2.0 nearly doubled the average return over
+                                     # R:R>=1.5 (+0.53% -> +0.68%) on a real sample (n=28 filled), not just noise.
+                                     # Set to None to disable and alert regardless of R:R.
 
 # ---------------------------------------------------------------------------
 # Long-term historical analysis (up to LONG_HISTORY_YEARS of daily data per

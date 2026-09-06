@@ -205,13 +205,15 @@ def summarize(results, label, key_prefix):
         print(f"  Equal-sized-bet cumulative multiple across all signals (no compounding logic beyond this): {compounded:.2f}x")
 
 
-def summarize_combined_filter(results, min_score, min_rr):
-    """Directly tests the actual proposed live config (both filters applied
-    together) rather than inferring it from two separate single-dimension
-    breakdowns, which don't necessarily combine additively."""
-    subset = [r for r in results if r["score"] >= min_score and
+def summarize_combined_filter(results, min_score, max_score, min_rr):
+    """Directly tests the actual proposed live config (all three filters
+    applied together) rather than inferring it from separate single-
+    dimension breakdowns, which don't necessarily combine additively."""
+    max_score = max_score if max_score is not None else 5
+    subset = [r for r in results if min_score <= r["score"] <= max_score and
               (r.get("new_risk_reward") is not None and r["new_risk_reward"] >= min_rr)]
-    summarize(subset, f"Combined filter — score >= {min_score} AND R:R >= {min_rr} "
+    label = f"score {min_score}" if min_score == max_score else f"score {min_score}-{max_score}"
+    summarize(subset, f"Combined filter — {label} AND R:R >= {min_rr} "
                        f"({len(subset)}/{len(results)} signals, the actual proposed live config)", "new")
 
 
@@ -302,21 +304,26 @@ def main():
     # (Without this, once that config value is set to e.g. 2.0, evaluate()
     # would only ever return R:R>=2.0 signals here, collapsing the very
     # comparison this diagnostic exists to make.)
-    # Same reasoning as the R:R override: MIN_SIGNAL_SCORE gates evaluate()'s
-    # return the same way (score < MIN_SIGNAL_SCORE -> None), so without this
-    # override summarize_by_score() could only ever see whatever score level
-    # is currently live -- making it blind to exactly the comparison it
-    # exists to make (e.g. "would score=3 have done better than score=4?").
+    # Same reasoning as the R:R override: MIN_SIGNAL_SCORE and
+    # MAX_SIGNAL_SCORE_TO_ALERT both gate evaluate()'s return the same way
+    # (score outside [MIN, MAX] -> None), so without overriding BOTH,
+    # summarize_by_score() could only ever see whatever score band is
+    # currently live -- making it blind to exactly the comparison it exists
+    # to make. (MAX_SIGNAL_SCORE_TO_ALERT was added after a real instance of
+    # exactly this blind spot with MIN_SIGNAL_SCORE alone — don't add a third
+    # score-gating config value without adding it here too.)
     original_min_rr = config.MIN_RISK_REWARD_TO_ALERT
     original_min_score = config.MIN_SIGNAL_SCORE
+    original_max_score = config.MAX_SIGNAL_SCORE_TO_ALERT
     config.MIN_RISK_REWARD_TO_ALERT = None
     config.MIN_SIGNAL_SCORE = 1
-    print(f"(Note: backtesting with MIN_RISK_REWARD_TO_ALERT and MIN_SIGNAL_SCORE temporarily disabled/lowered — "
-          f"live config has them at {original_min_rr!r} and {original_min_score!r} respectively — "
-          f"see the score and R:R breakdowns below to judge what those settings should actually be. Minor caveat: "
-          f"lowering MIN_SIGNAL_SCORE also slightly inflates the ATR-fallback branch's target sizing bonus, since "
-          f"that branch scales off score-vs-MIN_SIGNAL_SCORE — negligible in practice since most signals use the "
-          f"pattern-based branch, not the ATR fallback.)\n")
+    config.MAX_SIGNAL_SCORE_TO_ALERT = None
+    print(f"(Note: backtesting with MIN_RISK_REWARD_TO_ALERT, MIN_SIGNAL_SCORE, and MAX_SIGNAL_SCORE_TO_ALERT "
+          f"temporarily disabled/widened — live config has them at {original_min_rr!r}, {original_min_score!r}, "
+          f"and {original_max_score!r} respectively — see the score and R:R breakdowns below to judge what those "
+          f"settings should actually be. Minor caveat: lowering MIN_SIGNAL_SCORE also slightly inflates the "
+          f"ATR-fallback branch's target sizing bonus, since that branch scales off score-vs-MIN_SIGNAL_SCORE — "
+          f"negligible in practice since most signals use the pattern-based branch, not the ATR fallback.)\n")
 
     universe = args.symbols.split(",") if args.symbols else data_fetcher.load_universe()
     print(f"Backtesting {len(universe)} symbols over the last {args.months} months "
@@ -352,7 +359,7 @@ def main():
     print("\nNEW method broken down by amount of historical precedent (does more matching past setups predict better outcomes?):")
     summarize_by_sample_size(all_results)
     summarize_risk_reward(all_results)
-    summarize_combined_filter(all_results, original_min_score, original_min_rr or 0)
+    summarize_combined_filter(all_results, original_min_score, original_max_score, original_min_rr or 0)
     summarize_grid(all_results)
 
     extended = [r for r in all_results if r["extended"]]
@@ -364,6 +371,7 @@ def main():
 
     config.MIN_RISK_REWARD_TO_ALERT = original_min_rr  # restore, in case this module is ever imported rather than run standalone
     config.MIN_SIGNAL_SCORE = original_min_score
+    config.MAX_SIGNAL_SCORE_TO_ALERT = original_max_score
 
     with open(args.out, "w") as f:
         json.dump(all_results, f, indent=2, default=str)

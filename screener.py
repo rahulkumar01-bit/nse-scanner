@@ -215,6 +215,8 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_t
     score = sum(1 for v in checks.values() if v)
     if score < config.MIN_SIGNAL_SCORE:
         return None
+    if config.MAX_SIGNAL_SCORE_TO_ALERT is not None and score > config.MAX_SIGNAL_SCORE_TO_ALERT:
+        return None  # near-unanimous confluence backtested worse than moderate confluence — see config.py
 
     reasons = []
     if checks["day_move"]:
