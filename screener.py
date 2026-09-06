@@ -256,6 +256,7 @@ def evaluate(symbol, baseline, live, instrument="EQ", oi_change_pct=None, long_t
         "pct_change": round(pct_change, 2),
         "score": score,
         "max_score": len(checks),
+        "checks": checks,
         "reasons": reasons,
         "date": datetime.now(_IST).strftime("%Y-%m-%d"),
         "extended": extended,

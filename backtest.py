@@ -172,6 +172,7 @@ def backtest_symbol(symbol, hist, months, market_trend_series=None):
             "symbol": symbol, "date": str(df.index[t].date()), "score": sig["score"],
             "extended": sig["extended"], "levels_basis": sig["levels_basis"], "levels_method": sig["levels_method"],
             "sample_size": (long_term_snapshot or {}).get("breakout_sample_size", 0),
+            "check_combo": ",".join(sorted(k for k, v in sig["checks"].items() if v)),
             "market_uptrend": market_uptrend,
             "new_entry": sig["entry"], "new_target": sig["target"], "new_stop": sig["stop_loss"],
             "new_risk_reward": sig["risk_reward"],
@@ -336,6 +337,35 @@ def summarize_with_regime_filter(results, min_score, max_score, min_rr):
     summarize(with_filter, f"  With regime filter (would restrict to {len(with_filter)}/{len(base)} signals)", "new")
 
 
+def summarize_by_check_combo(results, min_n=10):
+    """The key structural question the score-count breakdown can't answer:
+    are all combinations that add up to the same score actually equivalent?
+    (e.g. day_move+volume_surge+breakout, a single correlated cluster of
+    evidence about one strong move, vs day_move+volume_surge+rsi_momentum,
+    which adds a genuinely different signal — pre-existing trend.) Only
+    reports combos with at least min_n signals, since there are many
+    possible combinations and most will be too thin to trust."""
+    combos = sorted(set(r["check_combo"] for r in results if r.get("check_combo")))
+    print(f"\nNEW method broken down by the EXACT combination of checks that fired "
+          f"(not just how many — only combos with >= {min_n} signals shown):")
+    rows = []
+    for combo in combos:
+        subset = [r for r in results if r["check_combo"] == combo]
+        filled = [r for r in subset if r.get("new_return_pct") is not None]
+        if len(filled) < min_n:
+            continue
+        returns = [r["new_return_pct"] for r in filled]
+        wins = sum(1 for r in filled if r["new_outcome"] == "target")
+        rows.append((combo, len(subset), len(filled), wins / len(filled) * 100, statistics.mean(returns)))
+    rows.sort(key=lambda r: -r[4])  # best avg return first
+    if not rows:
+        print(f"  (No combination reached the {min_n}-signal minimum — try a longer backtest window.)")
+        return
+    print(f"{'Checks that fired':<55}{'n':>6}{'filled':>8}{'target%':>9}{'avg%':>8}")
+    for combo, n, filled, target_pct, avg in rows:
+        print(f"{combo:<55}{n:>6}{filled:>8}{target_pct:>8.0f}%{avg:>+7.2f}%")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--months", type=int, default=6)
@@ -406,6 +436,7 @@ def main():
     summarize_by_method(all_results)
     print("\nNEW method broken down by signal score (does more confluence predict better outcomes?):")
     summarize_by_score(all_results)
+    summarize_by_check_combo(all_results)
     print("\nNEW method broken down by amount of historical precedent (does more matching past setups predict better outcomes?):")
     summarize_by_sample_size(all_results)
     summarize_risk_reward(all_results)
