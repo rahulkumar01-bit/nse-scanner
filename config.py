@@ -63,15 +63,17 @@ BREAKOUT_LOOKBACK_DAYS = 20         # "N-day high" breakout lookback
 RSI_PERIOD = 14
 RSI_MOMENTUM_MIN = 60               # RSI should be above this and rising
 MIN_SIGNAL_SCORE = 3                # out of the 5 checks in screener.py, how many must fire to alert
-                                     # (backtested across scores 1-5 on a 3151-signal sample: score=3 was the clear
-                                     # best performer — +0.46% avg return, 37% target-hit rate, tightest worst-case.
-                                     # score=4 was WORSE despite the stricter bar (70% stop rate on n=19) — more
-                                     # confluence didn't mean better setups here, likely because requiring near-
-                                     # unanimous signals sometimes just means the move is already extended/climactic,
-                                     # not healthier. Don't raise this again without similar evidence.)
-MAX_SIGNAL_SCORE_TO_ALERT = 3       # exclude score 4-5 setups entirely — replicated across TWO separate backtest runs
-                                     # showing they underperform score=3 (70-86% stop-out rates both times), not just
-                                     # noise from a small sample. Set to None to disable and allow any score >= MIN_SIGNAL_SCORE.
+                                     # (backtested across scores 1-5 on 6- and 12-month samples: score=3 consistently
+                                     # outperforms scores 1-2. Score 4-5 setups are fine too PROVIDED R:R>=2.0 is also
+                                     # required — see MAX_SIGNAL_SCORE_TO_ALERT for why a blanket score cap isn't used.)
+MAX_SIGNAL_SCORE_TO_ALERT = None    # DISABLED again after a 12-month re-test contradicted the 6-month finding that
+                                     # motivated it: with more data, score>=3 pooled (including 4-5) at R:R>=2.0 beat
+                                     # score==3 exact (+0.51% vs +0.37%, similar sample sizes) — the reverse of what a
+                                     # smaller sample (n=28) suggested. What DOES replicate across all three looks so
+                                     # far: score>=4 combined with a LOOSER R:R (~1.5) is reliably bad (67-86% stop
+                                     # rate every time) — but R:R>=2.0 already filters that out on its own. The
+                                     # narrower, better-supported rule is "let R:R do this job", not a blanket score
+                                     # cap. Re-enable only with similarly strong repeated evidence.
 
 # F&O-specific (only used if quote data includes open interest)
 OI_CHANGE_PCT_THRESHOLD = 8.0       # today's OI build-up, in %, for "long buildup" confirmation
@@ -92,10 +94,10 @@ ATR_PERIOD = 14
 STOP_LOSS_ATR_MULTIPLIER = 1.5      # stop = entry - (this * ATR-14); wider ATR = more room, tighter = less
 STOP_LOSS_PCT_FALLBACK = 4.0        # used only if ATR can't be computed (e.g. insufficient history)
 MIN_RISK_REWARD_TO_ALERT = 2.0      # only alert on setups where (target-entry)/(entry-stop) >= 2.0, skipping weaker-odds
-                                     # setups entirely. Within the score==3 subset specifically (the group MAX_SIGNAL_
-                                     # SCORE_TO_ALERT now isolates), R:R>=2.0 nearly doubled the average return over
-                                     # R:R>=1.5 (+0.53% -> +0.68%) on a real sample (n=28 filled), not just noise.
-                                     # Set to None to disable and alert regardless of R:R.
+                                     # setups entirely. Held up across both a 6-month sample (score==3 subset: +0.53%
+                                     # -> +0.68% going from R:R>=1.5 to >=2.0) and a 12-month re-test (score>=3 pooled:
+                                     # +0.51% avg at R:R>=2.0, n=68 — the best-performing config found so far and the
+                                     # one that generalized best across both windows). Set to None to disable.
 
 # ---------------------------------------------------------------------------
 # Long-term historical analysis (up to LONG_HISTORY_YEARS of daily data per

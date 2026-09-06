@@ -291,6 +291,29 @@ def summarize_grid(results):
               f"{statistics.mean(returns):>+7.2f}%{statistics.median(returns):>+8.2f}%{min(returns):>+7.2f}%")
 
 
+def summarize_by_period(results, min_score, min_rr, n_periods=2):
+    """Splits the proposed config's signals by date into N roughly-equal
+    periods and reports each separately. A real, repeatable edge should look
+    reasonably similar across periods; one where all the profit comes from a
+    single period (e.g. one strong bull stretch) is a regime-dependence red
+    flag, not a robust strategy — exactly the kind of thing a single-window
+    backtest can't tell you on its own."""
+    subset = sorted(
+        (r for r in results if r["score"] >= min_score and (r.get("new_risk_reward") or 0) >= min_rr),
+        key=lambda r: r["date"])
+    if len(subset) < n_periods * 5:
+        print(f"\n(Too few signals ({len(subset)}) in the score>={min_score}/R:R>={min_rr} config to split into "
+              f"{n_periods} periods meaningfully — skipping the stability check.)")
+        return
+    chunk = len(subset) // n_periods
+    print(f"\nTime-stability check for score>={min_score}, R:R>={min_rr} — split into {n_periods} periods "
+          f"by date (a real edge should look broadly similar across periods, not concentrated in one):")
+    for i in range(n_periods):
+        piece = subset[i * chunk: (i + 1) * chunk] if i < n_periods - 1 else subset[i * chunk:]
+        if piece:
+            summarize(piece, f"  Period {i+1}: {piece[0]['date']} to {piece[-1]['date']}", "new")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--months", type=int, default=6)
@@ -361,6 +384,7 @@ def main():
     summarize_risk_reward(all_results)
     summarize_combined_filter(all_results, original_min_score, original_max_score, original_min_rr or 0)
     summarize_grid(all_results)
+    summarize_by_period(all_results, original_min_score, original_min_rr or 0, n_periods=2)
 
     extended = [r for r in all_results if r["extended"]]
     print(f"\n{len(extended)} of {len(all_results)} signals were flagged 'extended' "
